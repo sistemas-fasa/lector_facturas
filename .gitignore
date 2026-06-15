@@ -1,0 +1,32 @@
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local invoice samples, OCR reports, and generated handoff files
+batch_reports/
+facturas_ocr_prueba/
+*.ready
+FACTURA_*.json
+FACTURA_*.xml
+originales/
+cola/
+
+# Runtime/log output
+*.log
+*.tmp
+*.bak
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

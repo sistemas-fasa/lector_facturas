@@ -1,0 +1,150 @@
+{
+  "name": "Facturas OCR - Email a staging FoxPro",
+  "nodes": [
+    {
+      "parameters": {
+        "downloadAttachments": true,
+        "options": {
+          "mailbox": "INBOX",
+          "postProcessAction": "read",
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "leer-mail-facturas",
+      "name": "Leer Mail Facturas",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [
+        -900,
+        100
+      ],
+      "credentials": {
+        "imap": {
+          "id": "hDKM1DU0bt8P1Ta4",
+          "name": "Facturas Compras IMAP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const allowed = new Set([\"pdf\", \"jpg\", \"jpeg\", \"png\"]);\nconst allowedSenders = [\"@fasa.ar\", \"@ferreteriaavenida.com.ar\"];\nconst out = [];\n\nfunction pick(...values) {\n  for (const value of values) {\n    if (value !== undefined && value !== null && String(value).trim() !== '') return String(value);\n  }\n  return '';\n}\n\nfunction normalizeEmail(value) {\n  const raw = String(value || '').toLowerCase();\n  const match = raw.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}/i);\n  return match ? match[0].toLowerCase() : raw.trim();\n}\n\nfunction senderAllowed(value) {\n  if (!allowedSenders.length) return true;\n  const email = normalizeEmail(value);\n  return allowedSenders.some((rule) => {\n    if (!rule) return false;\n    if (rule.startsWith('@')) return email.endsWith(rule);\n    if (rule.includes('@')) return email === rule;\n    return email.endsWith('@' + rule);\n  });\n}\n\nfunction extensionFromMime(mimeType) {\n  const mime = String(mimeType || '').toLowerCase();\n  if (mime.includes('pdf')) return 'pdf';\n  if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg';\n  if (mime.includes('png')) return 'png';\n  return '';\n}\n\nfor (const item of items) {\n  const binary = item.binary || {};\n  const json = item.json || {};\n  const from = pick(json.from, json.fromEmail, json.sender, json.headers?.from);\n  const to = pick(json.to, json.toEmail, json.headers?.to);\n  const subject = pick(json.subject);\n  const date = pick(json.date, json.headers?.date);\n  const messageId = pick(json.messageId, json.message_id, json.headers?.['message-id']);\n\n  if (!senderAllowed(from)) {\n    continue;\n  }\n\n  for (const [key, value] of Object.entries(binary)) {\n    const fileName = pick(value.fileName, value.filename, key);\n    const mimeType = pick(value.mimeType, value.mime);\n    const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';\n    const inferredExt = ext || extensionFromMime(mimeType);\n    const normalizedFileName = fileName.includes('.') || !inferredExt ? fileName : `${fileName}.${inferredExt}`;\n    const allowedByExt = allowed.size === 0 || allowed.has(ext);\n    const allowedByMime = /^(application\\/pdf|image\\/(jpeg|png))$/i.test(mimeType);\n    if (!allowedByExt && !allowedByMime) continue;\n\n    out.push({\n      json: {\n        email_from: from,\n        email_to: to,\n        email_subject: subject,\n        email_date: date,\n        email_message_id: messageId,\n        email_attachment_key: key,\n        email_attachment_name: normalizedFileName,\n        email_attachment_mime: mimeType,\n      },\n      binary: { file: { ...value, fileName: normalizedFileName } },\n    });\n  }\n}\n\nreturn out;"
+      },
+      "id": "extraer-adjuntos",
+      "name": "Extraer Adjuntos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -620,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://invoice-parser:8765/enqueue?source_type=email",
+        "authentication": "none",
+        "responseFormat": "json",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "file"
+            },
+            {
+              "name": "email_from",
+              "value": "={{$json.email_from}}"
+            },
+            {
+              "name": "email_to",
+              "value": "={{$json.email_to}}"
+            },
+            {
+              "name": "email_subject",
+              "value": "={{$json.email_subject}}"
+            },
+            {
+              "name": "email_date",
+              "value": "={{$json.email_date}}"
+            },
+            {
+              "name": "email_message_id",
+              "value": "={{$json.email_message_id}}"
+            },
+            {
+              "name": "email_attachment_name",
+              "value": "={{$json.email_attachment_name}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "enviar-a-parser-ocr",
+      "name": "Enviar a Parser OCR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -320,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "for (const item of items) {\n  const result = item.json || {};\n  if (result.status === 'ERROR') {\n    throw new Error(result.error || 'invoice-parser devolvio ERROR');\n  }\n  if (result.status === 'QUEUED') {\n    item.json.queued = true;\n  }\n}\nreturn items;"
+      },
+      "id": "registrar-resultado",
+      "name": "Registrar Resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        100
+      ]
+    }
+  ],
+  "connections": {
+    "Leer Mail Facturas": {
+      "main": [
+        [
+          {
+            "node": "Extraer Adjuntos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer Adjuntos": {
+      "main": [
+        [
+          {
+            "node": "Enviar a Parser OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar a Parser OCR": {
+      "main": [
+        [
+          {
+            "node": "Registrar Resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "active": false
+}
