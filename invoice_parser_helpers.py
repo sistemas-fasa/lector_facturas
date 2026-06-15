@@ -30,7 +30,7 @@ INVOICE_NUMBER_RE = re.compile(
     re.I,
 )
 INVOICE_NUMBER_ALT_RE = re.compile(
-    r"Punto\s+de\s+Venta\s*:\s*(\d{4,5}).*?Comp\.?\s*Nro\s*:\s*(\d{6,10})",
+    r"(?:Punto\s+de\s+Venta|Pto\.?\s*Vta\.?)\s*:\s*(\d{4,5}).*?Comp\.?\s*Nro\.?\s*:\s*(\d{6,10})",
     re.I | re.S,
 )
 DEFAULT_TOTAL_TOLERANCE = Decimal(os.environ.get("INVOICE_TOTAL_TOLERANCE", "1.00"))
@@ -212,7 +212,8 @@ def _best_invoice_number_match(body: str) -> re.Match[str] | None:
             points += 15
         return points
 
-    return max(matches, key=score)
+    best = max(matches, key=score)
+    return best if score(best) > 0 else None
 
 
 def extract_total(text: str) -> float:
@@ -306,6 +307,13 @@ def extract_iva(text: str, rate: str = "21") -> float:
     return _extract_amount_by_patterns(text, patterns)
 
 
+def _extract_iva_positive_text(text: str, rate: str) -> str | None:
+    amount = normalize_amount_decimal(extract_iva(text, rate))
+    if amount is None or amount <= 0:
+        return None
+    return f"{amount:.2f}"
+
+
 def _empty_field() -> dict[str, Any]:
     return {
         "valor": None,
@@ -351,6 +359,25 @@ def _line_evidence(text: str, pattern: str) -> str:
     return re.sub(r"\s+", " ", match.group(0)).strip()[:180] if match else ""
 
 
+def _total_evidence(text: str) -> str:
+    candidates: list[tuple[int, str]] = []
+    for line in (text or "").splitlines():
+        if not re.search(r"\b(?:Importe\s+)?Total\b", line, re.I):
+            continue
+        if re.search(r"subtotal|total\s+iva|iva\s+total|cantidad|descripci[oó]n|precio\s+unit|%desc|unitario|cae", line, re.I):
+            continue
+        score = 0
+        if re.search(r"total\s+a\s+pagar|importe\s+total|total\s+final", line, re.I):
+            score += 40
+        if re.search(r"\$|\bARS\b|\bUSD\b|U\$S", line, re.I):
+            score += 10
+        candidates.append((score, line.strip()))
+    if not candidates:
+        return _line_evidence(text, r"\bTotal\b|Importe\s+Total")
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]
+
+
 def _first_text_field(
     pdf_text: str,
     ocr_text: str,
@@ -365,7 +392,8 @@ def _first_text_field(
         if formatter is not None and value not in (None, ""):
             value = formatter(value)
         if value not in (None, "", 0, 0.0):
-            evidence = _line_evidence(text, evidence_pattern) or str(value)
+            evidence = _total_evidence(text) if method == "regex_total" else _line_evidence(text, evidence_pattern)
+            evidence = evidence or str(value)
             return _field(value, confidence, source, method, evidence)
     return _empty_field()
 
@@ -434,6 +462,21 @@ def _extract_importe_otros(text: str) -> str | None:
     return _decimal_text(_extract_amount_by_patterns(text, [r"\bOtros\s*(?:impuestos|tributos)\s*[:$ ]+\s*([0-9][0-9.,]*)"]))
 
 
+def _extract_neto_gravado_text(text: str) -> str | None:
+    return _decimal_text(
+        _extract_amount_by_patterns(
+            text,
+            [
+                r"\bImporte\s+Neto\s+Gravado\s*[:$ ]+\s*([0-9][0-9.,]*)",
+                r"\bNeto\s*(?:gravado)?\s*[:$ ]+\s*([0-9][0-9.,]*)",
+                r"\bSub\s*total\s*[:$ ]+\s*([0-9][0-9.,]*)",
+                r"\bSubtotal\s*[:$ ]+\s*([0-9][0-9.,]*)",
+                r"\bSubt\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
+            ],
+        )
+    )
+
+
 def _extract_percepciones_iva(text: str) -> str | None:
     return _decimal_text(
         _extract_amount_by_patterns(
@@ -499,10 +542,10 @@ def _build_enriched_extraction(
         "numero_comprobante": (_extract_number, "regex_numero_comprobante", r"Comp\.?\s*Nro|Nro|[0-9]{4,5}\s*[- ]\s*[0-9]{6,10}", None),
         "fecha_emision": (normalize_date, "regex_fecha_emision", r"Fecha\s+(?:de\s+)?Emisi[oó]n|Fecha\s*:", None),
         "moneda": (_extract_currency, "regex_moneda", r"\bARS\b|\bUSD\b|U\$S|\$", None),
-        "neto_gravado": (lambda t: _decimal_text(_extract_amount_by_patterns(t, [r"\bImporte\s+Neto\s+Gravado\s*[:$ ]+\s*([0-9][0-9.,]*)", r"\bNeto\s*(?:gravado)?\s*[:$ ]+\s*([0-9][0-9.,]*)"])), "regex_neto_gravado", r"Neto\s+Gravado|Importe\s+Neto", None),
-        "iva_21": (lambda t: _decimal_text(extract_iva(t, "21")), "regex_iva_21", r"I\W*V\W*A.*21|21.*I\W*V\W*A", None),
-        "iva_105": (lambda t: _decimal_text(extract_iva(t, "10.5")), "regex_iva_105", r"I\W*V\W*A.*10[,.]5|10[,.]5.*I\W*V\W*A", None),
-        "iva_27": (lambda t: _decimal_text(extract_iva(t, "27")), "regex_iva_27", r"I\W*V\W*A.*27|27.*I\W*V\W*A", None),
+        "neto_gravado": (_extract_neto_gravado_text, "regex_neto_gravado", r"Neto\s+Gravado|Importe\s+Neto|Sub\s*total|Subtotal|Subt\.", None),
+        "iva_21": (lambda t: _extract_iva_positive_text(t, "21"), "regex_iva_21", r"I\W*V\W*A.*21|21.*I\W*V\W*A", None),
+        "iva_105": (lambda t: _extract_iva_positive_text(t, "10.5"), "regex_iva_105", r"I\W*V\W*A.*10[,.]5|10[,.]5.*I\W*V\W*A", None),
+        "iva_27": (lambda t: _extract_iva_positive_text(t, "27"), "regex_iva_27", r"I\W*V\W*A.*27|27.*I\W*V\W*A", None),
         "percepciones_iva": (_extract_percepciones_iva, "regex_percepciones_iva", r"Percepci[oó]n\s+I\.?\s*V\.?\s*A\.?|Percepciones?\s+IVA", None),
         "otros_tributos": (_extract_importe_otros, "regex_otros_tributos", r"Otros\s*(?:impuestos|tributos)", None),
         "total": (lambda t: _decimal_text(extract_total(t)), "regex_total", r"\bTotal\b|Importe\s+Total", None),
@@ -1744,6 +1787,8 @@ def _extract_neto_gravado(
         [
             r"\bImporte\s+Neto\s+Gravado\s*[:$ ]+\s*([0-9][0-9.,]*)",
             r"\bNeto\s*(?:gravado)?\s*[:$ ]+\s*([0-9][0-9.,]*)",
+            r"\bSub\s*total\s*[:$ ]+\s*([0-9][0-9.,]*)",
+            r"\bSubtotal\s*[:$ ]+\s*([0-9][0-9.,]*)",
             r"\bSubt\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
         ],
     )
@@ -1822,11 +1867,46 @@ def _extract_cae(text: str) -> str | None:
 
 
 def _extract_emisor_cuit(text: str) -> str:
-    issuer_text = re.split(r"\bSr\s*/?\s*\(?es\)?|\bSr\.\(s\)|\bCliente\b|\bDomicilio\s*:", text or "", maxsplit=1, flags=re.I)[0]
+    lines = (text or "").splitlines()
+    first_invoice_idx = next(
+        (
+            idx
+            for idx, line in enumerate(lines)
+            if re.search(r"\bFACTURA\b|\bNOTA\s+DE\s+CR[EÉ]DITO\b|\bNOTA\s+DE\s+D[EÉ]BITO\b", line, re.I)
+        ),
+        None,
+    )
     patterns = [
         r"\bC[UÜVLI1|]{1,3}T\s*[:#—-]?\s*(\d{2}[- ]?\d{8}[- ]?\d|\d{11})",
         r"\b(\d{2}[- ]?\d{8}[- ]?\d|\d{11})\b",
     ]
+    scored: list[tuple[int, int, str]] = []
+    for idx, line in enumerate(lines):
+        for pattern in patterns:
+            for match in re.finditer(pattern, line, re.I):
+                digits = re.sub(r"\D", "", match.group(1))
+                if not _valid_cuit_digits(digits):
+                    continue
+                context = "\n".join(lines[max(0, idx - 2) : min(len(lines), idx + 3)])
+                score = 0
+                if re.search(r"\b(?:PROVEEDOR|EMISOR|VENDEDOR|RAZ[OÓ]N\s+SOCIAL|CONDICI[OÓ]N\s+FRENTE\s+AL\s+IVA|INGRESOS\s+BRUTOS)\b", context, re.I):
+                    score += 40
+                if re.search(r"\b(?:CLIENTE|RECEPTOR|COMPRADOR|SR\.?\s*/?\s*\(?ES\)?|APELLIDO\s+Y\s+NOMBRE)\b", context, re.I):
+                    score -= 70
+                if first_invoice_idx is not None:
+                    if idx <= first_invoice_idx:
+                        score += 30
+                        score -= abs(first_invoice_idx - idx)
+                    else:
+                        score -= 20 + min(idx - first_invoice_idx, 20)
+                else:
+                    score -= idx
+                scored.append((score, -idx, digits))
+    if scored:
+        scored.sort(reverse=True)
+        return _format_cuit(scored[0][2])
+
+    issuer_text = re.split(r"\bSr\s*/?\s*\(?es\)?|\bSr\.\(s\)|\bCliente\b|\bDomicilio\s*:", text or "", maxsplit=1, flags=re.I)[0]
     for scope in (issuer_text, text or ""):
         for pattern in patterns:
             for match in re.finditer(pattern, scope, re.I):

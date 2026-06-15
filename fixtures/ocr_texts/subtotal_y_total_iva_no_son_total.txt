@@ -1,0 +1,11 @@
+PROVEEDOR SUBTOTAL SRL
+CUIT: 30-50000007-0
+
+FACTURA A
+Punto de Venta: 0002    Comp. Nro: 00000015
+Fecha de Emision: 12/06/2026
+
+Subtotal: $ 1.000,00
+IVA 21% 210,00
+Total IVA: $ 210,00
+Total a pagar: $ 1.210,00

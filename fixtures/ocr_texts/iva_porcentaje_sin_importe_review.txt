@@ -1,0 +1,10 @@
+PROVEEDOR IVA SIN IMPORTE SRL
+CUIT: 30-50000007-0
+
+FACTURA A
+Punto de Venta: 0008    Comp. Nro: 00000077
+Fecha de Emision: 15/06/2026
+
+Importe Neto Gravado: 1.000,00
+IVA 21%
+Total: $ 1.210,00

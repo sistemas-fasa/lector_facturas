@@ -1,0 +1,19 @@
+PROVEEDOR NORTE SRL
+CUIT: 30-50000007-0
+Ingresos Brutos: 1234567
+Tel: 0376-4444555
+
+FACTURA A
+Punto de Venta: 0003    Comp. Nro: 00000042
+Fecha de Emision: 12/06/2026
+
+Cliente: CLIENTE ANONIMIZADO SA
+CUIT: 30-71471099-7
+
+Importe Neto Gravado: 1.000,00
+IVA 21% 210,00
+Percepciones IIBB Misiones 30,00
+Otros tributos: 5,00
+Total: $ 1.245,00
+CAE: 12345678901234
+Fecha Vto. CAE: 22/06/2026

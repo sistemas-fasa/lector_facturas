@@ -1,0 +1,12 @@
+PROVEEDOR TELEFONO SRL
+CUIT: 30-50000007-0
+Telefono administracion: 0004-00099887
+WhatsApp ventas: 3764-112233
+
+FACTURA A
+Pto. Vta.: 0007    Comp. Nro.: 00000128
+Fecha de Emision: 13/06/2026
+
+Importe Neto Gravado: 1.000,00
+IVA 21% 210,00
+Total: $ 1.210,00

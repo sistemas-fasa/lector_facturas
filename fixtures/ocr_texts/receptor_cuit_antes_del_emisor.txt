@@ -1,0 +1,16 @@
+Cliente: EMPRESA RECEPTORA SA
+CUIT: 30-50000007-0
+
+PROVEEDOR SUR SRL
+CUIT: 30-71471099-7
+Condicion frente al IVA: Responsable Inscripto
+
+FACTURA B
+Punto de Venta: 0005    Comp. Nro: 00000456
+Fecha de Emision: 14/06/2026
+
+Importe Neto Gravado: 1.000,00
+IVA 21% 210,00
+Total: $ 1.210,00
+CAE: 22345678901234
+Fecha Vto. CAE: 24/06/2026
