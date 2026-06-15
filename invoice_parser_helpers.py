@@ -276,6 +276,10 @@ def extract_total(text: str) -> float:
 
 
 def extract_iva(text: str, rate: str = "21") -> float:
+    table_values = _extract_tax_table_values(text, rate)
+    if table_values.get("iva", 0.0) > 0:
+        return table_values["iva"]
+
     escaped = re.escape(rate).replace("\\.", r"[,.]")
     lines = (text or "").splitlines()
     for idx, line in enumerate(lines):
@@ -284,7 +288,7 @@ def extract_iva(text: str, rate: str = "21") -> float:
         iva_match = re.search(r"\bI\W*V\W*A\b", normalized)
         if not iva_match:
             continue
-        rate_match = re.search(rf"\b{escaped}\b", normalized, re.I)
+        rate_match = re.search(rf"\b{escaped}\s*%", normalized, re.I)
         if not rate_match:
             continue
         same_line_tail = line[rate_match.end() :]
@@ -311,8 +315,8 @@ def extract_iva(text: str, rate: str = "21") -> float:
             return candidates[-1]
 
     patterns = [
-        rf"\bI\W*V\W*A\W*{escaped}\s*%?\s*[:$ ]+\s*([0-9][0-9.,]*)",
-        rf"\b{escaped}\s*%?\s*I\W*V\W*A\s*[:$ ]+\s*([0-9][0-9.,]*)",
+        rf"\bI\W*V\W*A\W*{escaped}\s*%\s*[:$ ]+\s*([0-9][0-9.,]*)",
+        rf"\b{escaped}\s*%\s*I\W*V\W*A\s*[:$ ]+\s*([0-9][0-9.,]*)",
     ]
     if str(rate) == "21":
         patterns.extend(
@@ -324,7 +328,42 @@ def extract_iva(text: str, rate: str = "21") -> float:
     return _extract_amount_by_patterns(text, patterns)
 
 
+def _extract_tax_table_values(text: str, rate: str = "21") -> dict[str, float]:
+    escaped = re.escape(rate).replace("\\.", r"[,.]")
+    lines = (text or "").splitlines()
+    for idx, line in enumerate(lines):
+        normalized = unicodedata.normalize("NFKD", line or "")
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch)).upper()
+        if not all(token in normalized for token in ("BASE", "IVA", "IMP")):
+            continue
+        for data_line in lines[idx + 1 : min(len(lines), idx + 4)]:
+            rate_match = re.search(rf"\b{escaped}(?:[,.]0+)?\s*%", data_line, re.I)
+            if not rate_match:
+                continue
+            before = [
+                normalize_amount(token)
+                for token in re.findall(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?", data_line[: rate_match.start()])
+            ]
+            after = [
+                normalize_amount(token)
+                for token in re.findall(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?", data_line[rate_match.end() :])
+            ]
+            base_values = [value for value in before if value > 0]
+            tax_values = [value for value in after if value > 0]
+            if base_values and tax_values:
+                return {
+                    "base": base_values[-1],
+                    "iva": tax_values[0],
+                    "subtotal": tax_values[-1] if len(tax_values) > 1 else 0.0,
+                }
+    return {}
+
+
 def _extract_iva_taxable_base(text: str, rate: str = "21") -> float:
+    table_values = _extract_tax_table_values(text, rate)
+    if table_values.get("base", 0.0) > 0:
+        return table_values["base"]
+
     escaped = re.escape(rate).replace("\\.", r"[,.]")
     for line in (text or "").splitlines():
         normalized = unicodedata.normalize("NFKD", line or "")
@@ -521,7 +560,7 @@ def _extract_neto_gravado_text(text: str) -> str | None:
             [
                 r"\bSub\s*total\s*[:$ ]+\s*([0-9][0-9.,]*)",
                 r"\bSubtotal\s*[:$ ]+\s*([0-9][0-9.,]*)",
-                r"\bSubt\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
+                r"(?<![A-Za-z])Subt\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
             ],
         )
     )
@@ -628,6 +667,8 @@ def _build_enriched_extraction(
             amount_text = f"{Decimal(str(amount)).quantize(Decimal('0.01')):.2f}"
             fields["percepciones_iibb"] = _field(amount_text, 70, "ocr", "factura_ocr_iibb", str(advanced.get("perceptions_iibb")))
 
+    _dedupe_iibb_and_otros_tributos(fields)
+
     iva_values = [
         normalize_amount_decimal(fields[name]["valor"])
         for name in ("iva_21", "iva_105", "iva_27")
@@ -688,6 +729,37 @@ def _validate_enriched_fields(fields: dict[str, dict[str, Any]], qr_data: dict[s
         "fallas": failures,
         "balance_importes": balance,
     }
+
+
+def _dedupe_iibb_and_otros_tributos(fields: dict[str, dict[str, Any]]) -> None:
+    otros = normalize_amount_decimal(fields["otros_tributos"]["valor"])
+    iibb = normalize_amount_decimal(fields["percepciones_iibb"]["valor"])
+    total = normalize_amount_decimal(fields["total"]["valor"])
+    neto = normalize_amount_decimal(fields["neto_gravado"]["valor"]) or Decimal("0.00")
+    iva_values = [
+        normalize_amount_decimal(fields[name]["valor"]) or Decimal("0.00")
+        for name in ("iva_21", "iva_105", "iva_27")
+    ]
+    if otros is None or otros <= 0 or iibb is None or iibb <= 0:
+        return
+
+    base = neto + sum(iva_values, Decimal("0.00"))
+    if iibb == otros:
+        fields["otros_tributos"] = _empty_field()
+        return
+    if total is None:
+        return
+    closes_with_otros = abs((base + otros) - total) <= DEFAULT_TOTAL_TOLERANCE
+    closes_with_iibb = abs((base + iibb) - total) <= DEFAULT_TOTAL_TOLERANCE
+    if closes_with_otros and not closes_with_iibb:
+        fields["percepciones_iibb"] = _field(
+            f"{otros.quantize(Decimal('0.01')):.2f}",
+            max(int(fields["percepciones_iibb"]["confianza"] or 0), 80),
+            fields["otros_tributos"]["fuente"],
+            "otros_tributos_iibb_balance",
+            fields["otros_tributos"]["evidencia"],
+        )
+        fields["otros_tributos"] = _empty_field()
 
 
 def _validate_amount_balance(fields: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1857,7 +1929,7 @@ def _extract_neto_gravado(
         [
             r"\bSub\s*total\s*[:$ ]+\s*([0-9][0-9.,]*)",
             r"\bSubtotal\s*[:$ ]+\s*([0-9][0-9.,]*)",
-            r"\bSubt\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
+            r"(?<![A-Za-z])Subt\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
         ],
     )
     if subtotal > 0:

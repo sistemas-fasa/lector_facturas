@@ -127,3 +127,44 @@ def test_taxable_base_from_iva_detail_can_be_neto_for_credit_note() -> None:
     assert invoice["importes"]["total"] == 244631.99
     assert enriched["neto_gravado"]["valor"] == "202175.20"
     assert enriched["percepciones_iibb"]["valor"] is None
+
+
+def test_subtotal_attached_to_exempt_amount_is_extracted_as_neto() -> None:
+    invoice = parse_fixture("subtotal_pegado_a_exento.txt")
+    enriched = fields(invoice)
+
+    assert invoice["estado"] == "OK"
+    assert invoice["importes"]["neto_gravado"] == 70431.65
+    assert enriched["neto_gravado"]["valor"] == "70431.65"
+    assert enriched["iva_21"]["valor"] == "14790.65"
+    assert enriched["total"]["valor"] == "85222.30"
+
+
+def test_iibb_in_otros_tributos_is_not_counted_twice() -> None:
+    invoice = parse_fixture("otros_tributos_iibb_no_doble_conteo.txt")
+    enriched = fields(invoice)
+
+    assert invoice["estado"] == "OK"
+    assert enriched["percepciones_iibb"]["valor"] == "96621.10"
+    assert enriched["otros_tributos"]["valor"] is None
+    assert invoice["extraccion_enriquecida"]["validaciones"]["balance_importes"]["calculado"] == "3628691.69"
+
+
+def test_iva_27_is_not_extracted_from_iva_21_amount_cents() -> None:
+    invoice = parse_fixture("iva_27_no_sale_de_centavos.txt")
+    enriched = fields(invoice)
+
+    assert invoice["estado"] == "OK"
+    assert enriched["iva_21"]["valor"] == "34189.27"
+    assert enriched["iva_27"]["valor"] is None
+    assert enriched["iva_total"]["valor"] == "34189.27"
+
+
+def test_tax_table_base_iva_subtotal_extracts_neto_and_iva() -> None:
+    invoice = parse_fixture("tabla_base_iva_subtotal.txt")
+    enriched = fields(invoice)
+
+    assert invoice["estado"] == "OK"
+    assert enriched["neto_gravado"]["valor"] == "1890400.00"
+    assert enriched["iva_21"]["valor"] == "396984.00"
+    assert enriched["total"]["valor"] == "2287384.00"
