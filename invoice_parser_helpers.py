@@ -156,6 +156,16 @@ def normalize_date(text: Any) -> str | None:
         return None
 
 
+def _extract_issue_date(text: str) -> str | None:
+    return _extract_date_by_patterns(
+        text,
+        [
+            r"Fecha\s+(?:de\s+)?Emisi[oó]n\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+            r"Fecha\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        ],
+    ) or normalize_date(text)
+
+
 def extract_cuit(text: str) -> str:
     candidates = re.findall(r"\b\d{2}[- ]?\d{8}[- ]?\d\b|\b\d{11}\b", text or "")
     for candidate in candidates:
@@ -304,7 +314,35 @@ def extract_iva(text: str, rate: str = "21") -> float:
         rf"\bI\W*V\W*A\W*{escaped}\s*%?\s*[:$ ]+\s*([0-9][0-9.,]*)",
         rf"\b{escaped}\s*%?\s*I\W*V\W*A\s*[:$ ]+\s*([0-9][0-9.,]*)",
     ]
+    if str(rate) == "21":
+        patterns.extend(
+            [
+                r"\bTasa\s+Gral\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
+                r"\bTasa\s+General\s*[:$ ]+\s*([0-9][0-9.,]*)",
+            ]
+        )
     return _extract_amount_by_patterns(text, patterns)
+
+
+def _extract_iva_taxable_base(text: str, rate: str = "21") -> float:
+    escaped = re.escape(rate).replace("\\.", r"[,.]")
+    for line in (text or "").splitlines():
+        normalized = unicodedata.normalize("NFKD", line or "")
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch)).upper()
+        if not re.search(r"\bI\W*V\W*A\b", normalized):
+            continue
+        rate_match = re.search(rf"\b{escaped}\b", normalized, re.I)
+        if not rate_match:
+            continue
+        tail = line[rate_match.end() :]
+        values = [
+            normalize_amount(token)
+            for token in re.findall(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?", tail)
+        ]
+        material_values = [value for value in values if value > 100]
+        if len(material_values) >= 2:
+            return material_values[-2]
+    return 0.0
 
 
 def _extract_iva_positive_text(text: str, rate: str) -> str | None:
@@ -463,12 +501,24 @@ def _extract_importe_otros(text: str) -> str | None:
 
 
 def _extract_neto_gravado_text(text: str) -> str | None:
+    explicit = _extract_amount_by_patterns(
+        text,
+        [
+            r"\bImporte\s+Neto\s+Gravado\s*[:$ ]+\s*([0-9][0-9.,]*)",
+            r"\bNeto\s*(?:gravado)?\s*[:$ ]+\s*([0-9][0-9.,]*)",
+        ],
+    )
+    if explicit > 0:
+        return _decimal_text(explicit)
+
+    iva_base = _extract_iva_taxable_base(text, "21")
+    if iva_base > 0:
+        return _decimal_text(iva_base)
+
     return _decimal_text(
         _extract_amount_by_patterns(
             text,
             [
-                r"\bImporte\s+Neto\s+Gravado\s*[:$ ]+\s*([0-9][0-9.,]*)",
-                r"\bNeto\s*(?:gravado)?\s*[:$ ]+\s*([0-9][0-9.,]*)",
                 r"\bSub\s*total\s*[:$ ]+\s*([0-9][0-9.,]*)",
                 r"\bSubtotal\s*[:$ ]+\s*([0-9][0-9.,]*)",
                 r"\bSubt\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
@@ -540,7 +590,7 @@ def _build_enriched_extraction(
         "tipo_comprobante": (_extract_invoice_letter_type, "regex_tipo_comprobante", r"FACTURA|NOTA\s+DE\s+CR[EÉ]DITO|NOTA\s+DE\s+D[EÉ]BITO", None),
         "punto_venta": (_extract_point, "regex_punto_venta", r"Punto\s+de\s+Venta|Pto\.?\s*Vta|[0-9]{4,5}\s*[- ]\s*[0-9]{6,10}", None),
         "numero_comprobante": (_extract_number, "regex_numero_comprobante", r"Comp\.?\s*Nro|Nro|[0-9]{4,5}\s*[- ]\s*[0-9]{6,10}", None),
-        "fecha_emision": (normalize_date, "regex_fecha_emision", r"Fecha\s+(?:de\s+)?Emisi[oó]n|Fecha\s*:", None),
+        "fecha_emision": (_extract_issue_date, "regex_fecha_emision", r"Fecha\s+(?:de\s+)?Emisi[oó]n|Fecha\s*:", None),
         "moneda": (_extract_currency, "regex_moneda", r"\bARS\b|\bUSD\b|U\$S|\$", None),
         "neto_gravado": (_extract_neto_gravado_text, "regex_neto_gravado", r"Neto\s+Gravado|Importe\s+Neto|Sub\s*total|Subtotal|Subt\.", None),
         "iva_21": (lambda t: _extract_iva_positive_text(t, "21"), "regex_iva_21", r"I\W*V\W*A.*21|21.*I\W*V\W*A", None),
@@ -567,9 +617,16 @@ def _build_enriched_extraction(
         if codjur:
             fields["codjur"] = _field(codjur, 80, "ocr", "factura_ocr_iibb_detail", evidence)
     elif advanced.get("perceptions_iibb"):
-        amount = _decimal_text(advanced.get("perceptions_iibb"))
-        if amount:
-            fields["percepciones_iibb"] = _field(amount, 70, "ocr", "factura_ocr_iibb", str(advanced.get("perceptions_iibb")))
+        total_value = float(normalize_amount_decimal(fields["total"]["valor"]) or Decimal("0.00"))
+        cuit_value = str(fields["proveedor_cuit"]["valor"] or "")
+        reference_amounts = [
+            float(normalize_amount_decimal(fields[name]["valor"]) or Decimal("0.00"))
+            for name in ("neto_gravado", "iva_21", "iva_105", "iva_27")
+        ]
+        amount = _sane_iibb_amount(advanced, total_value, cuit_value, reference_amounts=reference_amounts)
+        if amount > 0:
+            amount_text = f"{Decimal(str(amount)).quantize(Decimal('0.01')):.2f}"
+            fields["percepciones_iibb"] = _field(amount_text, 70, "ocr", "factura_ocr_iibb", str(advanced.get("perceptions_iibb")))
 
     iva_values = [
         normalize_amount_decimal(fields[name]["valor"])
@@ -667,7 +724,7 @@ def _validate_qr_against_text(fields: dict[str, dict[str, Any]], qr_data: dict[s
         "proveedor_cuit": _first_text_field("", text, _extract_emisor_cuit, "regex_cuit", r"C[UÜVLI1|]{1,3}T|[0-9]{2}[- ]?[0-9]{8}[- ]?[0-9]")["valor"],
         "punto_venta": _first_text_field("", text, _extract_point, "regex_punto_venta", r"Punto\s+de\s+Venta|[0-9]{4,5}\s*[- ]\s*[0-9]{6,10}")["valor"],
         "numero_comprobante": _first_text_field("", text, _extract_number, "regex_numero_comprobante", r"Comp\.?\s*Nro|[0-9]{4,5}\s*[- ]\s*[0-9]{6,10}")["valor"],
-        "fecha_emision": _first_text_field("", text, normalize_date, "regex_fecha_emision", r"Fecha\s+(?:de\s+)?Emisi[oó]n|Fecha\s*:")["valor"],
+        "fecha_emision": _first_text_field("", text, _extract_issue_date, "regex_fecha_emision", r"Fecha\s+(?:de\s+)?Emisi[oó]n|Fecha\s*:")["valor"],
         "total": _first_text_field("", text, lambda t: _decimal_text(extract_total(t)), "regex_total", r"\bTotal\b|Importe\s+Total")["valor"],
     }
     for field_name, qr_value in comparisons.items():
@@ -705,7 +762,7 @@ def build_invoice_json(
     qr_data = _qr_afip_data(qr_afip)
     advanced_invoice = _extract_with_facturas_ocr(ocr_text, original_filename)
     invoice_number = extract_invoice_number(ocr_text)
-    issue_date = normalize_date(ocr_text)
+    issue_date = _extract_issue_date(ocr_text)
     due_date = _extract_date_by_patterns(
         ocr_text,
         [
@@ -1782,22 +1839,32 @@ def _extract_neto_gravado(
     iva_27: float,
     advanced_invoice: dict[str, Any] | None,
 ) -> float:
+    iva_total = normalize_amount(iva_21) + normalize_amount(iva_105) + normalize_amount(iva_27)
     explicit = _extract_amount_by_patterns(
         text,
         [
             r"\bImporte\s+Neto\s+Gravado\s*[:$ ]+\s*([0-9][0-9.,]*)",
             r"\bNeto\s*(?:gravado)?\s*[:$ ]+\s*([0-9][0-9.,]*)",
+        ],
+    )
+    if explicit > 0:
+        return explicit
+    iva_base = _extract_iva_taxable_base(text, "21")
+    if iva_base > 0 and total > 0 and iva_total > 0 and abs((iva_base + iva_total) - total) <= 0.05:
+        return iva_base
+    subtotal = _extract_amount_by_patterns(
+        text,
+        [
             r"\bSub\s*total\s*[:$ ]+\s*([0-9][0-9.,]*)",
             r"\bSubtotal\s*[:$ ]+\s*([0-9][0-9.,]*)",
             r"\bSubt\.?\s*[:$ ]+\s*([0-9][0-9.,]*)",
         ],
     )
-    if explicit > 0:
-        return explicit
+    if subtotal > 0:
+        return subtotal
     advanced_subtotal = normalize_amount((advanced_invoice or {}).get("subtotal"))
     if advanced_subtotal > 0:
         return advanced_subtotal
-    iva_total = normalize_amount(iva_21) + normalize_amount(iva_105) + normalize_amount(iva_27)
     if total > iva_total > 0:
         return round(total - iva_total, 2)
     return 0.0
@@ -1876,6 +1943,18 @@ def _extract_emisor_cuit(text: str) -> str:
         ),
         None,
     )
+    customer_start_idx = next(
+        (
+            idx
+            for idx, line in enumerate(lines)
+            if re.search(
+                r"\b(?:CLIENTE|RECEPTOR|COMPRADOR|SEÑORES?|SENORES?|SR\.?\s*/?\s*\(?ES\)?|CUIT\s*:.*LISTA|COND\.?\s*VTA|LOCALIDAD\s*:|TRANSPORTE)\b|DOMICILIO\s*:",
+                line,
+                re.I,
+            )
+        ),
+        None,
+    )
     patterns = [
         r"\bC[UÜVLI1|]{1,3}T\s*[:#—-]?\s*(\d{2}[- ]?\d{8}[- ]?\d|\d{11})",
         r"\b(\d{2}[- ]?\d{8}[- ]?\d|\d{11})\b",
@@ -1889,10 +1968,19 @@ def _extract_emisor_cuit(text: str) -> str:
                     continue
                 context = "\n".join(lines[max(0, idx - 2) : min(len(lines), idx + 3)])
                 score = 0
-                if re.search(r"\b(?:PROVEEDOR|EMISOR|VENDEDOR|RAZ[OÓ]N\s+SOCIAL|CONDICI[OÓ]N\s+FRENTE\s+AL\s+IVA|INGRESOS\s+BRUTOS)\b", context, re.I):
+                if re.search(r"\b(?:PROVEEDOR|EMISOR|RAZ[OÓ]N\s+SOCIAL|CONDICI[OÓ]N\s+FRENTE\s+AL\s+IVA|INGRESOS\s+BRUTOS)\b", context, re.I):
                     score += 40
-                if re.search(r"\b(?:CLIENTE|RECEPTOR|COMPRADOR|SR\.?\s*/?\s*\(?ES\)?|APELLIDO\s+Y\s+NOMBRE)\b", context, re.I):
+                if re.search(
+                    r"\b(?:CLIENTE|RECEPTOR|COMPRADOR|SEÑORES?|SENORES?|SR\.?\s*/?\s*\(?ES\)?|APELLIDO\s+Y\s+NOMBRE|LISTA|COND\.?\s*VTA|LOCALIDAD|TRANSPORTE|VENDEDOR)\b|DOMICILIO\s*:",
+                    context,
+                    re.I,
+                ):
                     score -= 70
+                if customer_start_idx is not None:
+                    if idx < customer_start_idx:
+                        score += 30 - min(customer_start_idx - idx, 10)
+                    else:
+                        score -= 60 + min(idx - customer_start_idx, 20)
                 if first_invoice_idx is not None:
                     if idx <= first_invoice_idx:
                         score += 30

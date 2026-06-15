@@ -1,0 +1,17 @@
+PROVEEDOR ANONIMO SA
+CUIT: 30-50000007-0
+Ingresos Brutos: 30500000070
+Condicion frente al IVA: Responsable Inscripto
+
+FACTURA A
+Punto de Venta: 0003    Comp. Nro: 00000130
+Fecha de Emision: 02/06/2026
+
+Cliente: CLIENTE ANONIMIZADO SA
+CUIT: 30-71471099-7
+
+Importe Neto Gravado: $ 976.709,24
+IVA 21%: $ 205.108,94
+Importe Total: $ 1.181.818,18
+CAE: 12345678901234
+Fecha Vto. CAE: 12/06/2026

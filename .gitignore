@@ -13,6 +13,7 @@ htmlcov/
 
 # Local invoice samples, OCR reports, and generated handoff files
 batch_reports/
+muestras_privadas/
 facturas_ocr_prueba/
 *.ready
 FACTURA_*.json

@@ -83,3 +83,47 @@ def test_iva_percentage_without_amount_does_not_become_zero_amount() -> None:
     assert invoice["estado"] == "REVIEW_REQUIRED"
     assert enriched["iva_21"]["valor"] is None
     assert any(failure["codigo"] == "TOTAL_MISMATCH" for failure in invoice["extraccion_enriquecida"]["validaciones"]["fallas"])
+
+
+def test_ingresos_brutos_equal_to_cuit_is_not_iibb_perception() -> None:
+    invoice = parse_fixture("ingresos_brutos_no_es_percepcion.txt")
+    enriched = fields(invoice)
+
+    assert invoice["estado"] == "OK"
+    assert invoice["emisor"]["cuit"] == "30-50000007-0"
+    assert invoice["importes"]["percepciones_iibb"] == 0.0
+    assert enriched["percepciones_iibb"]["valor"] is None
+    assert enriched["percepciones_iibb"]["fuente"] == "vacio"
+
+
+def test_tasa_gral_is_iva_and_receiver_cuit_does_not_override_issuer() -> None:
+    invoice = parse_fixture("tasa_gral_iibb_y_cuit_receptor.txt")
+    enriched = fields(invoice)
+
+    assert invoice["estado"] == "OK"
+    assert invoice["emisor"]["cuit"] == "30-50000007-0"
+    assert invoice["comprobante"]["letra"] == "A"
+    assert invoice["comprobante"]["punto_venta"] == "00011"
+    assert invoice["comprobante"]["numero"] == "00088539"
+    assert invoice["comprobante"]["fecha_emision"] == "2026-06-03"
+    assert invoice["importes"]["total"] == 1048381.62
+    assert invoice["importes"]["iva_21"] == 178267.32
+    assert invoice["importes"]["percepciones_iibb"] == 21222.3
+    assert enriched["iva_21"]["valor"] == "178267.32"
+    assert enriched["percepciones_iibb"]["valor"] == "21222.30"
+
+
+def test_taxable_base_from_iva_detail_can_be_neto_for_credit_note() -> None:
+    invoice = parse_fixture("nc_iva_base_es_neto_gravado.txt")
+    enriched = fields(invoice)
+
+    assert invoice["estado"] == "OK"
+    assert invoice["comprobante"]["tipo"] == "NOTA_CREDITO"
+    assert invoice["emisor"]["cuit"] == "30-50000007-0"
+    assert invoice["comprobante"]["punto_venta"] == "00018"
+    assert invoice["comprobante"]["numero"] == "00035671"
+    assert invoice["importes"]["neto_gravado"] == 202175.2
+    assert invoice["importes"]["iva_21"] == 42456.79
+    assert invoice["importes"]["total"] == 244631.99
+    assert enriched["neto_gravado"]["valor"] == "202175.20"
+    assert enriched["percepciones_iibb"]["valor"] is None

@@ -1,0 +1,23 @@
+A Factura
+
+QUIMICA ANONIMA SA
+Domicilio Comercial: Calle Falsa 123
+Rosario - Santa Fe - Argentina C.U.I.T: 30-50000007-0
+Inicio de Actividades: 01/01/2000
+
+Punto de Venta: 00011    Comp. Nro: 00088539
+Fecha de Emision: 03/06/2026
+
+Señores : CLIENTE ANONIMIZADO SA Codigo: 102976
+Domicilio: Ruta Nacional 12 TEL: 0376-4444555
+Localidad: Garupa Transporte: RETIRA
+CUIT : 30-71471099-7 Lista: 5
+IVA : Responsable inscripto Vendedor: ANONIMO
+Cond. Vta: 60 DIAS FECHA FACTURA
+
+SUBTOTAL : 848.892,00
+TASA GRAL. : 178.267,32
+Percep IIBB Misiones: 21.222,30
+TOTAL : 1.048.381,62
+CAE : 12345678901234
+VTO CAE : 13/06/2026
