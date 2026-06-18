@@ -18,6 +18,12 @@ facturas_ocr_prueba/
 *.ready
 FACTURA_*.json
 FACTURA_*.xml
+FACTURA_*_pdf_text.txt
+FACTURA_*_ocr_text.txt
+FACTURA_*_combined_text.txt
+FACTURA_*_diagnostico.json
+FACTURA_*_qr.json
+debug/
 originales/
 cola/
 
