@@ -4,16 +4,21 @@
 
 Compras reenvia facturas a una casilla IMAP. n8n toma los adjuntos PDF/JPG/PNG, los manda al sidecar `invoice-parser`, y el parser guarda cabecera/detalle en MySQL para que Visual FoxPro lea desde las vistas staging.
 
+El flujo productivo principal es n8n -> `POST /enqueue?source_type=email`.
+El polling IMAP interno del servicio Python es opcional/secundario. El
+contrato estable entre n8n e `invoice-parser` esta documentado en
+`docs/n8n-email-ingestion.md`.
+
 ## Variables necesarias
 
 Copiar las claves de `.env.email.example` al `.env` real de `lector_factura`.
 
-Minimo requerido:
+Minimo requerido para crear/actualizar el workflow n8n:
 
 ```env
 N8N_API_URL=http://127.0.0.1:5678
 N8N_API_KEY=...
-INVOICE_EMAIL_HELPER_URL=http://invoice-parser:8765/parse
+INVOICE_EMAIL_HELPER_URL=http://invoice-parser:8765/enqueue
 INVOICE_EMAIL_WORKFLOW_NAME=Facturas OCR - Email a staging FoxPro
 INVOICE_EMAIL_FOLDER=INBOX
 INVOICE_EMAIL_ALLOWED_EXTENSIONS=pdf,jpg,jpeg,png
@@ -22,8 +27,6 @@ INVOICE_EMAIL_PARSE_TIMEOUT_MS=600000
 INVOICE_QR_MAX_PAGES=2
 INVOICE_QR_ZBAR_TIMEOUT_SECONDS=2
 INVOICE_QR_MAX_VARIANTS=10
-INVOICE_EMAIL_IMAP_POLL_ENABLED=true
-INVOICE_EMAIL_IMAP_POLL_INTERVAL_SECONDS=60
 INVOICE_EMAIL_IMAP_CREDENTIAL_ID=
 INVOICE_EMAIL_IMAP_CREDENTIAL_NAME=Facturas Compras IMAP
 ```
@@ -37,6 +40,16 @@ INVOICE_EMAIL_IMAP_USER=
 INVOICE_EMAIL_IMAP_PASSWORD=
 INVOICE_EMAIL_IMAP_SSL=true
 ```
+
+Variables opcionales solo para el polling IMAP interno del sidecar Python:
+
+```env
+INVOICE_EMAIL_IMAP_POLL_ENABLED=false
+INVOICE_EMAIL_IMAP_POLL_INTERVAL_SECONDS=60
+```
+
+No habilitar ese polling como reemplazo implicito del workflow n8n. Si se
+activa, debe tratarse como modo secundario y reutilizar el mismo encolado.
 
 ## Orden de aplicacion
 
@@ -91,6 +104,17 @@ El multipart incluye:
 - `email_message_id`
 - `email_attachment_name`
 
+El servicio tambien acepta metadata opcional para futuras mejoras:
+
+- `email_uid`
+- `email_folder`
+- `email_account`
+- `email_attachment_index`
+- `n8n_execution_id`
+- `n8n_workflow_id`
+- `n8n_workflow_name`
+- `n8n_node_name`
+
 El parser persiste cabecera/detalle en:
 
 - `facturas_ocr_cabecera`
@@ -98,7 +122,12 @@ El parser persiste cabecera/detalle en:
 - `facturas_ocr_eventos`
 - `facturas_ocr_email_origen`
 
-Si `INVOICE_EMAIL_IMAP_POLL_ENABLED=true`, el sidecar tambien puede leer la casilla IMAP directo, sin depender del trigger de n8n. Toma mails no leidos, encola los adjuntos permitidos y marca el mail como leido despues de encolar.
+Si `INVOICE_EMAIL_IMAP_POLL_ENABLED=true`, el sidecar tambien puede leer la
+casilla IMAP directo, sin depender del trigger de n8n. Ese modo toma mails no
+leidos, encola los adjuntos permitidos y marca el mail como leido despues de
+encolar. No es el flujo productivo principal si n8n esta activo, y no debe
+usarse para mover la responsabilidad de marcado de correos al servicio Python
+sin una decision explicita.
 
 La cola local del sidecar queda en:
 
