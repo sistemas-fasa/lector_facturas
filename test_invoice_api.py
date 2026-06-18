@@ -16,6 +16,7 @@ from host_invoice_parser_service import (
     _invoice_list_item,
     _scan_invoice_files,
     _compute_invoices_summary,
+    _summarize_job,
     OUTPUT_DIR,
 )
 
@@ -557,6 +558,15 @@ class TestAdminHTML:
         assert "<script>" not in html_content
         assert "&lt;script&gt;" in html_content or "&#x3C;script&#x3E;" in html_content
 
+    def test_admin_detail_non_numeric_id_returns_error(self, handler):
+        handler.path = "/admin/invoices/abc"
+        handler.do_GET()
+        assert handler.send_html_called is not None
+        html_content, status = handler.send_html_called
+        assert status == 400
+        assert "ID invalido" in html_content or "numerico" in html_content
+        assert "Volver" in html_content
+
 
 class TestQueueJobsEndpoint:
     @pytest.fixture
@@ -591,6 +601,82 @@ class TestQueueJobsEndpoint:
         assert handler.send_json_called is not None
         payload, status = handler.send_json_called
         assert status == 404
+
+    def test_jobs_list_omits_internal_paths(self, handler, temp_output_dir: str):
+        pendientes = Path(temp_output_dir) / "cola" / "pendientes"
+        pendientes.mkdir(parents=True)
+        job = {
+            "job_id": "12345-test",
+            "status": "QUEUED",
+            "original_filename": "factura.pdf",
+            "sha256": "abcd1234",
+            "source_type": "email",
+            "original_path": "/secret/path/original.pdf",
+            "metadata_path": "/secret/path/meta.json",
+            "source_metadata": {"email": {"from": "test@test.com"}},
+            "queued_at": "2026-06-18T12:00:00",
+        }
+        (pendientes / "12345-test.json").write_text(
+            json.dumps(job, ensure_ascii=False), encoding="utf-8"
+        )
+        handler.path = "/queue/jobs"
+        handler.do_GET()
+        assert handler.send_json_called is not None
+        payload, status = handler.send_json_called
+        assert status == 200
+        assert len(payload["items"]) >= 1
+        item = next(i for i in payload["items"] if i.get("job_id") == "12345-test")
+        assert "original_path" not in item
+        assert "metadata_path" not in item
+        assert item.get("original_filename") == "factura.pdf"
+        assert item.get("sha256") == "abcd1234"
+
+
+class TestSummarizeJob:
+    def test_keeps_safe_fields(self):
+        job = {
+            "job_id": "abc123",
+            "status": "DONE",
+            "sha256": "abcd",
+            "source_type": "email",
+            "original_filename": "inv.pdf",
+            "original_path": "/should/not/appear",
+            "metadata_path": "/should/not/appear",
+            "source_metadata": {"email": {"from": "x@x.com"}},
+            "queued_at": "2026-01-01T00:00:00",
+            "started_at": "2026-01-01T00:01:00",
+            "finished_at": "2026-01-01T00:02:00",
+            "force": False,
+            "result": {
+                "status": "OK",
+                "requires_review": False,
+                "staging": {"ok": True},
+                "json_file": "/internal/path/file.json",
+            },
+        }
+        result = _summarize_job(job)
+        assert result["job_id"] == "abc123"
+        assert result["status"] == "DONE"
+        assert result["original_filename"] == "inv.pdf"
+        assert "original_path" not in result
+        assert "metadata_path" not in result
+        assert "source_metadata" not in result
+        assert result["result"]["status"] == "OK"
+        assert result["result"]["requires_review"] is False
+        assert result["result"]["staging"] == {"ok": True}
+        assert "json_file" not in result["result"]
+
+    def test_handles_unreadable_job(self):
+        job = {"job_file": "/some/path.json", "_queue_dir": "pendientes", "status": "UNREADABLE"}
+        result = _summarize_job(job)
+        assert result["status"] == "UNREADABLE"
+        assert result["job_file"] == "/some/path.json"
+
+    def test_handles_minimal_job(self):
+        job = {"job_id": "minimal"}
+        result = _summarize_job(job)
+        assert result["job_id"] == "minimal"
+        assert "original_path" not in result
 
 
 class TestSummarizeDetail:

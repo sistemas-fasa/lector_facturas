@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.13 local tests; produ
     cgi = None
 import base64
 import email
+from glob import glob
 import html
 import imaplib
 from io import BytesIO
@@ -245,7 +246,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, IndexError):
             limit, offset = 100, 0
         status_filter = query.get("status", [None])[0]
-        jobs: list[dict[str, object]] = []
+        raw_jobs: list[dict[str, object]] = []
         for subdir_name in ("pendientes", "procesados", "errores"):
             if status_filter and status_filter.lower() != subdir_name:
                 continue
@@ -256,11 +257,11 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     jd = json.loads(meta_file.read_text(encoding="utf-8"))
                     jd["_queue_dir"] = subdir_name
-                    jobs.append(jd)
+                    raw_jobs.append(jd)
                 except Exception:
-                    jobs.append({"job_file": str(meta_file), "_queue_dir": subdir_name, "status": "UNREADABLE"})
-        total = len(jobs)
-        items = jobs[offset:offset + limit]
+                    raw_jobs.append({"job_file": str(meta_file), "_queue_dir": subdir_name, "status": "UNREADABLE"})
+        total = len(raw_jobs)
+        items = [_summarize_job(j) for j in raw_jobs[offset:offset + limit]]
         self.send_json({"items": items, "total": total, "limit": limit, "offset": offset})
 
     def _handle_queue_job_detail(self, job_id: str) -> None:
@@ -358,6 +359,12 @@ class Handler(BaseHTTPRequestHandler):
         self._serve_html(html_out)
 
     def _handle_admin_invoice_detail(self, invoice_id: str) -> None:
+        if not invoice_id.isdigit():
+            self._serve_html(
+                "<html><body><h1>ID invalido</h1><p>Debe ser numerico.</p><a href=\"/admin/invoices\">Volver al listado</a></body></html>",
+                status=400,
+            )
+            return
         invoice = _load_invoice_by_id(OUTPUT_DIR, invoice_id)
         if invoice is None:
             self._serve_html(f"<html><body><h1>Factura no encontrada</h1><a href=\"/admin/invoices\">Volver</a></body></html>", status=404)
@@ -1290,6 +1297,23 @@ def _fmt_amount(val: object) -> str:
         return str(val)
 
 
+def _summarize_job(job: dict[str, object]) -> dict[str, object]:
+    safe_keys = {
+        "job_id", "status", "original_filename", "sha256", "source_type",
+        "extension", "force", "queued_at", "started_at", "finished_at",
+        "error", "_queue_dir", "job_file",
+    }
+    result = {k: job[k] for k in safe_keys if k in job}
+    if "result" in job and isinstance(job["result"], dict):
+        r = job["result"]
+        result["result"] = {
+            "status": r.get("status"),
+            "requires_review": r.get("requires_review"),
+            "staging": r.get("staging"),
+        }
+    return result
+
+
 def _invoice_list_item(path: str) -> dict[str, object] | None:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -1466,7 +1490,6 @@ def _summarize_detail(invoice: dict[str, object]) -> dict[str, object]:
     json_path_str = ""
     for ext in (".json",):
         candidate = output_path / f"FACTURA_*_{sha8}{ext}"
-        from glob import glob
         found = glob(str(candidate))
         if found:
             json_path_str = found[0]
