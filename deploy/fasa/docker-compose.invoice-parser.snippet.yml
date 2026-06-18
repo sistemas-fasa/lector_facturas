@@ -1,0 +1,45 @@
+# =============================================================================
+# FASA - docker-compose snippet para el servicio invoice-parser
+# =============================================================================
+# Copiar este bloque dentro del servicio 'invoice-parser' en el
+# docker-compose.yml del servidor FASA (fasa_195).
+# No incluye secrets reales; completar via .env o directo en el compose.
+# =============================================================================
+
+  invoice-parser:
+    image: ghcr.io/sistemas-fasa/lector_facturas/invoice-parser:latest
+    container_name: invoice-parser
+    restart: unless-stopped
+    networks:
+      - n8n_network
+    volumes:
+      - facturas_data:/home/ferreteria/n8n/data
+      - /home/ferreteria/n8n/provider_profiles:/home/ferreteria/n8n/provider_profiles:ro
+    environment:
+      # --- Obligatorio: deshabilitar polling IMAP cuando n8n lee la misma casilla ---
+      - INVOICE_EMAIL_IMAP_POLL_ENABLED=false
+
+      # --- HTTP server ---
+      - INVOICE_HELPER_HOST=0.0.0.0
+      - INVOICE_HELPER_PORT=8765
+
+      # --- Output ---
+      - INVOICE_OUTPUT_DIR=/home/ferreteria/n8n/data/facturas_parseadas
+      - INVOICE_GENERATE_XML=true
+
+      # --- QR ---
+      - INVOICE_QR_MAX_PAGES=2
+      - INVOICE_QR_ZBAR_TIMEOUT_SECONDS=2
+      - INVOICE_QR_MAX_VARIANTS=10
+
+      # --- Proveedores ---
+      - INVOICE_PROVIDER_PROFILES_FILE=/home/ferreteria/n8n/provider_profiles/profiles.json
+
+      # --- MySQL staging (via .env o directo) ---
+      - FASA_MYSQL_HOST=${FASA_MYSQL_HOST:-db}
+      - FASA_MYSQL_PORT=${FASA_MYSQL_PORT:-3306}
+      - FASA_MYSQL_USER=${FASA_MYSQL_USER:-root}
+      - FASA_MYSQL_PASSWORD=${FASA_MYSQL_PASSWORD}
+      - FASA_MYSQL_DATABASE=${FASA_MYSQL_DATABASE:-fasa}
+    ports:
+      - "8765:8765"
