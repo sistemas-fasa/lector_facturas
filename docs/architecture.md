@@ -9,21 +9,40 @@ confianza suficiente.
 
 ---
 
+## Ingesta productiva de correo
+
+El flujo productivo de correo usa n8n como lector y orquestador principal.
+n8n lee la casilla, descarga adjuntos y llama al sidecar HTTP:
+
+```text
+POST http://invoice-parser:8765/enqueue?source_type=email
+Content-Type: multipart/form-data
+Campo obligatorio: file
+```
+
+Ese endpoint es parte del contrato productivo entre n8n e
+`invoice-parser`. El polling IMAP interno del servicio Python puede existir
+como modo opcional/secundario, pero no debe asumirse como el flujo principal
+cuando n8n esta activo. Ver `docs/n8n-email-ingestion.md` para el contrato
+completo.
+
+---
+
 ## Flujo principal (determinístico, siempre activo)
 
 ```
-Correo IMAP / n8n webhook
-  → Adjunto (PDF / JPG / PNG)
-  → Decodificación QR AFIP (zbarimg / pyzbar)
-  → Extracción de texto PDF (pymupdf)
-  → OCR con Tesseract (fallback si texto PDF insuficiente)
-  → Reglas de extracción locales (factura_ocr/extract.py)
-  → Heurísticas de validación cruzada (invoice_parser_helpers.py)
-    • QR vs. texto OCR
-    • Balance de importes (neto + IVA + percepciones = total)
-    • Dígito verificador de CUIT
-  → Persistencia en MySQL staging (facturas_ocr_cabecera, detalle, eventos)
-  → Consumo desde Visual FoxPro (vistas staging)
+n8n -> /enqueue?source_type=email
+  -> Adjunto (PDF / JPG / PNG)
+  -> Decodificacion QR AFIP (zbarimg / pyzbar)
+  -> Extraccion de texto PDF (pymupdf)
+  -> OCR con Tesseract (fallback si texto PDF insuficiente)
+  -> Reglas de extraccion locales (factura_ocr/extract.py)
+  -> Heuristicas de validacion cruzada (invoice_parser_helpers.py)
+    - QR vs. texto OCR
+    - Balance de importes (neto + IVA + percepciones = total)
+    - Digito verificador de CUIT
+  -> Persistencia en MySQL staging (facturas_ocr_cabecera, detalle, eventos)
+  -> Consumo desde Visual FoxPro (vistas staging)
 ```
 
 ### Componentes del pipeline determinístico
@@ -152,6 +171,9 @@ Reglas determinísticas
 5. **Sin modificación de lógica productiva.** Este documento describe una
    arquitectura futura; el código actual no contiene ninguna invocación a
    un modelo de IA generativa.
+6. **Contrato n8n estable.** La IA futura no debe cambiar el endpoint
+   `POST /enqueue?source_type=email`, el campo multipart `file` ni la
+   responsabilidad de n8n como lector principal de correo.
 
 ---
 
@@ -168,4 +190,6 @@ arquitectura híbrida:
 | `FASA_MYSQL_*` | Conexión a staging MySQL |
 | `INVOICE_EMAIL_*` | Configuración de casilla IMAP |
 
-Ver `docs/EMAIL_FACTURAS_OCR.md` para detalle de las variables de email.
+Ver `docs/EMAIL_FACTURAS_OCR.md` para el workflow de email y
+`docs/n8n-email-ingestion.md` para el contrato productivo n8n ->
+`invoice-parser`.
