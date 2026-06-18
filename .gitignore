@@ -27,6 +27,11 @@ debug/
 originales/
 cola/
 
+# Provider profiles — real profiles must NOT be versioned
+config/provider_profiles.json
+config/provider_profiles.local.json
+!config/provider_profiles.example.json
+
 # Runtime/log output
 *.log
 *.tmp

@@ -1,0 +1,34 @@
+{
+  "proveedores": {
+    "30500000070": {
+      "nombre": "Proveedor Demo S.A.",
+      "aliases": ["PROVEEDOR DEMO", "PROVEEDOR DEMO SA", "DEMO S.A."],
+      "campos": {
+        "total": ["TOTAL A PAGAR", "IMPORTE TOTAL", "TOTAL GENERAL"],
+        "neto_gravado": ["NETO GRAVADO", "SUBTOTAL GRAVADO"],
+        "iva_21": ["IVA 21%", "I.V.A. 21"],
+        "iva_105": ["IVA 10.5%", "I.V.A. 10,5"],
+        "percepciones_iibb": ["PERC. IIBB", "PERCEPCION INGRESOS BRUTOS", "PERCEP. IB"],
+        "otros_tributos": ["OTROS TRIBUTOS", "OTROS IMPUESTOS"],
+        "cae": ["CAE", "C.A.E."],
+        "vencimiento_cae": ["VTO CAE", "VENCIMIENTO CAE", "FECHA VTO CAE"]
+      },
+      "tolerancia_total": "1.00"
+    },
+    "30777777771": {
+      "nombre": "Distribuidora Ejemplo SRL",
+      "aliases": ["DISTRIBUIDORA EJEMPLO", "DIST EJEMPLO SRL"],
+      "campos": {
+        "total": ["TOTAL COMPROBANTE", "IMPORTE"],
+        "neto_gravado": ["NETO", "SUB-TOTAL GRAVADO"],
+        "iva_21": ["I.V.A. 21%"],
+        "cae": ["CODIGO AUTORIZACION", "C.A.E."]
+      },
+      "tolerancia_total": "2.00"
+    }
+  },
+  "aliases_globales": {
+    "DEMO SA": "30500000070",
+    "EJEMPLO SRL": "30777777771"
+  }
+}
