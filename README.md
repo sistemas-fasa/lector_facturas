@@ -40,7 +40,20 @@ n8n -> POST http://invoice-parser:8765/enqueue?source_type=email
 
 El request debe ser `multipart/form-data` con el adjunto en el campo `file`.
 El polling IMAP interno del servicio Python existe solo como modo opcional o
-secundario. Ver `docs/n8n-email-ingestion.md` para el contrato completo.
+secundario, pero **no debe activarse en producción si n8n ya está leyendo la
+misma casilla por IMAP**. Tener dos conexiones IMAP simultáneas a un mismo
+buzón desde n8n (trigger IDLE) y desde invoice-parser (polling cada 60s)
+provoca conflictos de conexión (ECONNRESET) con proveedores de correo como
+Ferozo debido a límites de conexiones concurrentes o timeouts idle.
+
+Ver `docs/n8n-email-ingestion.md` para el contrato completo.
+
+## Despliegue FASA
+
+Ver `deploy/fasa/README.md` para la configuracion productiva del servicio
+`invoice-parser` en el servidor FASA, incluyendo plantillas de environment y
+docker-compose que documentan por que `INVOICE_EMAIL_IMAP_POLL_ENABLED=false`
+es obligatorio en produccion con n8n.
 
 ## Perfiles por Proveedor
 
