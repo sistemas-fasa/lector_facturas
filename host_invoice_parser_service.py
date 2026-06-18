@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging, build_diagnostico
+from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging, build_diagnostico, write_debug_text_files
 
 
 HOST = os.environ.get("INVOICE_HELPER_HOST", "172.17.0.1")
@@ -563,6 +563,13 @@ def process_invoice_upload(
         original_bytes=data,
         original_extension=ext,
         generate_xml=GENERATE_XML,
+    )
+    write_debug_text_files(
+        invoice=invoice,
+        output_dir=OUTPUT_DIR,
+        pdf_text=text_sources["pdf_text"],
+        ocr_text=text_sources["ocr_text"],
+        combined_text=ocr_text,
     )
     staging = write_invoice_staging(invoice, written)
     print(f"estado final: {invoice['estado']} staging_ok={staging.get('ok')} error={staging.get('error')}", flush=True)

@@ -136,3 +136,28 @@ La cola local del sidecar queda en:
 ```
 
 FoxPro puede seguir usando `vw_facturas_ocr_pendientes` y `vw_facturas_ocr_detalle`; la vista de pendientes ahora incluye columnas de origen del mail.
+
+## Depuración: evidencia textual opcional
+
+Cuando `INVOICE_WRITE_DEBUG_TEXTS=true`, el sidecar escribe archivos auxiliares
+junto al JSON principal en una subcarpeta `debug/` dentro de `OUTPUT_DIR`:
+
+| Archivo | Contenido |
+|---|---|
+| `FACTURA_<fecha>_<sha8>_pdf_text.txt` | Texto extraído por PDF text |
+| `FACTURA_<fecha>_<sha8>_ocr_text.txt` | Texto extraído por OCR (Tesseract) |
+| `FACTURA_<fecha>_<sha8>_combined_text.txt` | Texto combinado usado por el parser |
+| `FACTURA_<fecha>_<sha8>_diagnostico.json` | Bloque de diagnóstico de la factura |
+| `FACTURA_<fecha>_<sha8>_qr.json` | Datos del QR AFIP (solo si se detectó) |
+
+**Comportamiento por defecto:** `INVOICE_WRITE_DEBUG_TEXTS=false` — no se
+escribe ningún archivo debug y los outputs actuales (JSON, XML, .ready,
+original) no cambian.
+
+**Advertencia:** Los archivos debug pueden contener datos fiscales, CUITs,
+importes y texto OCR completo. No versionarlos. No exponerlos sin control de
+acceso. El `.gitignore` del repositorio ya excluye estos archivos.
+
+**Uso recomendado:** Depuración local o soporte ante facturas fallidas. No
+activar en producción sin asegurar que el directorio `debug/` tenga
+permisos restringidos y rotación de archivos.

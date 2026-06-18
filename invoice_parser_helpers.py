@@ -2246,6 +2246,71 @@ def _dict_to_xml(parent: ET.Element, value: Any) -> None:
         parent.text = str(value)
 
 
+def write_debug_text_files(
+    *,
+    invoice: dict[str, Any],
+    output_dir: str | os.PathLike[str],
+    pdf_text: str = "",
+    ocr_text: str = "",
+    combined_text: str = "",
+) -> dict[str, str]:
+    enabled = os.environ.get("INVOICE_WRITE_DEBUG_TEXTS", "false").lower() == "true"
+    if not enabled:
+        return {}
+
+    sha256 = invoice.get("origen", {}).get("sha256") or ""
+    short_sha = sha256[:8]
+    date_stamp = datetime.now().strftime("%Y%m%d")
+    base_name = f"FACTURA_{date_stamp}_{short_sha}"
+
+    debug_dir = Path(output_dir) / "debug"
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"no se pudo crear directorio debug {debug_dir}: {exc}", flush=True)
+        return {}
+
+    files: dict[str, str] = {}
+
+    text_files = {
+        "pdf_text": pdf_text,
+        "ocr_text": ocr_text,
+        "combined_text": combined_text,
+    }
+    for key, content in text_files.items():
+        if not content:
+            continue
+        path = debug_dir / f"{base_name}_{key}.txt"
+        try:
+            _atomic_text_write(path, content)
+            files[key] = str(path)
+        except OSError as exc:
+            print(f"no se pudo escribir debug {key}: {exc}", flush=True)
+
+    diag = invoice.get("diagnostico") or build_diagnostico(invoice)
+    diag_path = debug_dir / f"{base_name}_diagnostico.json"
+    try:
+        _atomic_text_write(diag_path, json.dumps(diag, ensure_ascii=False, indent=2))
+        files["diagnostico"] = str(diag_path)
+    except OSError as exc:
+        print(f"no se pudo escribir debug diagnostico: {exc}", flush=True)
+
+    qr_afip = invoice.get("qr_afip") or {}
+    if qr_afip.get("detectado"):
+        qr_path = debug_dir / f"{base_name}_qr.json"
+        try:
+            _atomic_text_write(qr_path, json.dumps(qr_afip, ensure_ascii=False, indent=2))
+            files["qr"] = str(qr_path)
+        except OSError as exc:
+            print(f"no se pudo escribir debug qr: {exc}", flush=True)
+
+    if files:
+        invoice.setdefault("diagnostico", {}).setdefault("debug_files", {}).update(files)
+        invoice.setdefault("origen", {})["debug_files"] = dict(files)
+
+    return files
+
+
 def _atomic_text_write(path: Path, text: str) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(text, encoding="utf-8")

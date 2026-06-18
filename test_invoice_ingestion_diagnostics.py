@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch, call
 
 sys.modules.setdefault("cgi", types.SimpleNamespace(FieldStorage=object))
 import host_invoice_parser_service as service
-from invoice_parser_helpers import build_invoice_json, build_diagnostico, sha256_bytes
+from invoice_parser_helpers import build_invoice_json, build_diagnostico, sha256_bytes, write_debug_text_files
 
 
 SAMPLE_TEXT = """ACME SRL
@@ -441,3 +441,198 @@ def _sample_email_two_attachments_bytes() -> bytes:
         attachment.add_header("Content-Disposition", "attachment", filename=name)
         msg.attach(attachment)
     return msg.as_bytes()
+
+
+# ========== debug text evidence files ==========
+
+def test_write_debug_text_files_disabled_by_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("INVOICE_WRITE_DEBUG_TEXTS", raising=False)
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_TEXT,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="a" * 64,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_TEXT,
+    )
+    files = write_debug_text_files(
+        invoice=invoice,
+        output_dir=str(tmp_path),
+        pdf_text=SAMPLE_TEXT,
+        ocr_text=SAMPLE_TEXT,
+        combined_text=SAMPLE_TEXT,
+    )
+    assert files == {}
+
+
+def test_write_debug_text_files_creates_expected_files(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("INVOICE_WRITE_DEBUG_TEXTS", "true")
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_TEXT,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="aabbccdd" + "0" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_TEXT,
+    )
+    files = write_debug_text_files(
+        invoice=invoice,
+        output_dir=str(tmp_path),
+        pdf_text="pdf content",
+        ocr_text="ocr content",
+        combined_text="combined content",
+    )
+    assert "pdf_text" in files
+    assert "ocr_text" in files
+    assert "combined_text" in files
+    assert "diagnostico" in files
+    assert Path(files["pdf_text"]).exists()
+    assert Path(files["ocr_text"]).exists()
+    assert Path(files["combined_text"]).exists()
+    assert Path(files["diagnostico"]).exists()
+    assert Path(files["pdf_text"]).read_text(encoding="utf-8") == "pdf content"
+    assert Path(files["ocr_text"]).read_text(encoding="utf-8") == "ocr content"
+    assert Path(files["combined_text"]).read_text(encoding="utf-8") == "combined content"
+
+
+def test_write_debug_text_files_writes_qr_when_detected(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("INVOICE_WRITE_DEBUG_TEXTS", "true")
+    qr_afip = {
+        "detectado": True,
+        "url": "https://www.afip.gob.ar/fe/qr/?p=abc",
+        "datos": {"ver": 1, "cuit": 30500000070, "importe": 1245.00},
+    }
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_TEXT,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="bbccddee" + "1" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_TEXT,
+        qr_afip=qr_afip,
+    )
+    files = write_debug_text_files(
+        invoice=invoice,
+        output_dir=str(tmp_path),
+        pdf_text="",
+        ocr_text="",
+        combined_text="",
+    )
+    assert "qr" in files
+    assert Path(files["qr"]).exists()
+    qr_content = json.loads(Path(files["qr"]).read_text(encoding="utf-8"))
+    assert qr_content["detectado"] is True
+
+
+def test_write_debug_text_files_skips_qr_when_not_detected(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("INVOICE_WRITE_DEBUG_TEXTS", "true")
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_TEXT,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="ccddeeff" + "2" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_TEXT,
+    )
+    files = write_debug_text_files(
+        invoice=invoice,
+        output_dir=str(tmp_path),
+        pdf_text="",
+        ocr_text="",
+        combined_text="",
+    )
+    assert "qr" not in files
+
+
+def test_write_debug_text_files_write_error_does_not_raise(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("INVOICE_WRITE_DEBUG_TEXTS", "true")
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_TEXT,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="ddeeff00" + "3" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_TEXT,
+    )
+
+    def fake_write(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    with patch("invoice_parser_helpers._atomic_text_write", side_effect=fake_write):
+        files = write_debug_text_files(
+            invoice=invoice,
+            output_dir=str(tmp_path),
+            pdf_text="content",
+            ocr_text="",
+            combined_text="",
+        )
+    assert "pdf_text" not in files
+
+
+def test_write_debug_text_files_invoice_has_debug_files_in_diagnostico(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("INVOICE_WRITE_DEBUG_TEXTS", "true")
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_TEXT,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="eeff0011" + "4" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_TEXT,
+    )
+    files = write_debug_text_files(
+        invoice=invoice,
+        output_dir=str(tmp_path),
+        pdf_text="pdf content",
+        ocr_text="ocr content",
+        combined_text="combined content",
+    )
+    assert files
+    diag = invoice.get("diagnostico", {})
+    debug_files = diag.get("debug_files", {})
+    assert debug_files.get("pdf_text") == files.get("pdf_text")
+    assert debug_files.get("ocr_text") == files.get("ocr_text")
+
+
+def test_write_debug_text_files_disabled_no_debug_files_in_invoice(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("INVOICE_WRITE_DEBUG_TEXTS", raising=False)
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_TEXT,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="ff001122" + "5" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_TEXT,
+    )
+    write_debug_text_files(
+        invoice=invoice,
+        output_dir=str(tmp_path),
+        pdf_text="",
+        ocr_text="",
+        combined_text="",
+    )
+    diag = invoice.get("diagnostico", {})
+    assert "debug_files" not in diag
+
+
+def test_enqueue_invoice_job_preserves_ready_file_with_debug_enabled(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(service, "QUEUE_DIR", tmp_path)
+    monkeypatch.setattr(service, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("INVOICE_WRITE_DEBUG_TEXTS", "true")
+    (tmp_path / "pendientes").mkdir(parents=True)
+    (tmp_path / "procesados").mkdir(parents=True)
+    (tmp_path / "errores").mkdir(parents=True)
+    result = service.enqueue_invoice_job(
+        data=b"new content",
+        source_type="email",
+        original_filename="test.pdf",
+        mime_type="application/pdf",
+        source_metadata={},
+    )
+    assert result["status"] == "QUEUED"
