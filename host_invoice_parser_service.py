@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging
+from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging, build_diagnostico
 
 
 HOST = os.environ.get("INVOICE_HELPER_HOST", "172.17.0.1")
@@ -324,51 +324,156 @@ def poll_imap_once() -> None:
         if typ != "OK":
             return
         for msgid in (data[0] or b"").split():
-            typ, msgdata = mail.fetch(msgid, "(BODY.PEEK[])")
-            if typ != "OK" or not msgdata or not msgdata[0]:
-                continue
-            message = email.message_from_bytes(msgdata[0][1])
-            sender = _decode_mime_header(message.get("from", ""))
-            if not _sender_allowed(sender, allowed_senders):
-                continue
-            queued = 0
-            for part in message.walk():
-                if part.get_content_maintype() == "multipart":
-                    continue
-                filename = _decode_mime_header(part.get_filename() or "")
-                mime_type = part.get_content_type() or "application/octet-stream"
-                ext = Path(filename).suffix.lower().lstrip(".") or extension_from_mime_type(mime_type)
-                if allowed_extensions and ext.lower() not in allowed_extensions:
-                    continue
-                payload = part.get_payload(decode=True)
-                if not payload:
-                    continue
-                if not filename:
-                    filename = f"attachment_{queued}.{ext}"
-                enqueue_invoice_job(
-                    data=payload,
-                    source_type="email",
-                    original_filename=Path(filename).name,
-                    mime_type=mime_type,
-                    source_metadata={
-                        "email": {
-                            "from": sender,
-                            "to": _decode_mime_header(message.get("to", "")),
-                            "subject": _decode_mime_header(message.get("subject", "")),
-                            "date": _decode_mime_header(message.get("date", "")),
-                            "message_id": _decode_mime_header(message.get("message-id", "")),
-                            "attachment_name": Path(filename).name,
-                        }
-                    },
-                )
-                queued += 1
-            if queued:
-                mail.store(msgid, "+FLAGS", r"(\Seen)")
+            _process_imap_message(
+                mail=mail,
+                msgid=msgid,
+                allowed_senders=allowed_senders,
+                allowed_extensions=allowed_extensions,
+            )
     finally:
         try:
             mail.logout()
         except Exception:
             pass
+
+
+def _process_imap_message(
+    *,
+    mail: imaplib.IMAP4_SSL,
+    msgid: bytes,
+    allowed_senders: list[str],
+    allowed_extensions: set[str],
+) -> None:
+    try:
+        typ, msgdata = mail.fetch(msgid, "(UID BODY.PEEK[])")
+        if typ != "OK" or not msgdata or not msgdata[0]:
+            return
+        uid = _extract_uid_from_fetch(msgdata[0])
+        raw_bytes = msgdata[0][1]
+        message = email.message_from_bytes(raw_bytes)
+        sender = _decode_mime_header(message.get("from", ""))
+        if not _sender_allowed(sender, allowed_senders):
+            return
+        email_to = _decode_mime_header(message.get("to", ""))
+        email_subject = _decode_mime_header(message.get("subject", ""))
+        email_date = _decode_mime_header(message.get("date", ""))
+        message_id = _decode_mime_header(message.get("message-id", ""))
+
+        has_error = False
+        all_handled = True
+
+        for part in message.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            filename = _decode_mime_header(part.get_filename() or "")
+            mime_type = part.get_content_type() or "application/octet-stream"
+            ext = Path(filename).suffix.lower().lstrip(".") or extension_from_mime_type(mime_type)
+            if allowed_extensions and ext.lower() not in allowed_extensions:
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            if not filename:
+                filename = f"attachment.{ext}"
+
+            result = _enqueue_attachment_or_skip(
+                payload=payload,
+                filename=Path(filename).name,
+                mime_type=mime_type,
+                sender=sender,
+                email_to=email_to,
+                email_subject=email_subject,
+                email_date=email_date,
+                message_id=message_id,
+                uid=uid,
+                force=False,
+            )
+            if result == "error":
+                has_error = True
+            elif result == "skip":
+                pass
+        if not has_error and all_handled:
+            mail.store(msgid, "+FLAGS", r"(\Seen)")
+    except Exception as exc:
+        print(f"error procesando mensaje IMAP {msgid!r}: {exc}", flush=True)
+
+
+def _extract_uid_from_fetch(fetch_data: tuple[object, object]) -> str:
+    raw = str(fetch_data[0] if fetch_data else "")
+    match = re.search(r"UID\s+(\d+)", raw, re.I)
+    return match.group(1) if match else ""
+
+
+def _enqueue_attachment_or_skip(
+    *,
+    payload: bytes,
+    filename: str,
+    mime_type: str,
+    sender: str,
+    email_to: str,
+    email_subject: str,
+    email_date: str,
+    message_id: str,
+    uid: str,
+    force: bool = False,
+) -> str:
+    sha = sha256_bytes(payload)
+    source_metadata = {
+        "email": {
+            "from": sender,
+            "to": email_to,
+            "subject": email_subject,
+            "date": email_date,
+            "message_id": message_id,
+            "imap_uid": uid,
+            "attachment_name": filename,
+        }
+    }
+    source_metadata["email"] = {k: v for k, v in source_metadata["email"].items() if v}
+
+    if not force:
+        existing = _find_sha_in_queue_or_staging(sha)
+        if existing:
+            print(f"sha256 duplicado (omitido): {sha[:16]}... archivo={filename}", flush=True)
+            return "skip"
+
+    try:
+        enqueue_invoice_job(
+            data=payload,
+            source_type="email",
+            original_filename=filename,
+            mime_type=mime_type,
+            source_metadata=source_metadata,
+            force=force,
+        )
+        return "enqueued"
+    except Exception as exc:
+        print(f"error al encolar {filename}: {exc}", flush=True)
+        return "error"
+
+
+def _sha_in_queue_dir(sha256: str, subdir_name: str) -> bool:
+    subdir = QUEUE_DIR / subdir_name
+    if not subdir.is_dir():
+        return False
+    for meta_file in subdir.glob("*.json"):
+        try:
+            data = json.loads(meta_file.read_text(encoding="utf-8"))
+            if data.get("sha256") == sha256:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _find_sha_in_queue_or_staging(sha256: str) -> bool:
+    for subdir in ("pendientes", "procesados", "errores"):
+        if _sha_in_queue_dir(sha256, subdir):
+            return True
+    existing = find_existing_invoice_result(sha256)
+    if existing:
+        return True
+    return False
 
 
 def _csv_values(value: str) -> list[str]:
@@ -461,6 +566,7 @@ def process_invoice_upload(
     )
     staging = write_invoice_staging(invoice, written)
     print(f"estado final: {invoice['estado']} staging_ok={staging.get('ok')} error={staging.get('error')}", flush=True)
+    diagnostico = invoice.get("diagnostico") or build_diagnostico(invoice)
     return {
         "status": invoice["estado"],
         "json_file": written["json_file"],
@@ -469,6 +575,7 @@ def process_invoice_upload(
         "sha256": sha,
         "requires_review": invoice["validaciones"]["requiere_revision"],
         "staging": staging,
+        "diagnostico": diagnostico,
     }
 
 

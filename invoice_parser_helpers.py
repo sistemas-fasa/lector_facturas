@@ -986,7 +986,98 @@ def build_invoice_json(
     if provider_label and not (invoice.get("contabilidad") or {}).get("observaciones"):
         if _looks_like_bad_business_name(str(invoice["emisor"].get("razon_social") or "")):
             invoice["emisor"]["razon_social"] = provider_label[:120]
+    invoice["diagnostico"] = build_diagnostico(invoice)
     return invoice
+
+
+DIAGNOSTICO_FIELDS = [
+    "proveedor_cuit",
+    "tipo_comprobante",
+    "punto_venta",
+    "numero_comprobante",
+    "fecha_emision",
+    "total",
+    "moneda",
+    "cae",
+    "vencimiento_cae",
+    "neto_gravado",
+    "iva_21",
+    "iva_105",
+    "iva_27",
+    "percepciones_iibb",
+    "percepciones_iva",
+    "otros_tributos",
+]
+
+
+def build_diagnostico(invoice: dict[str, Any]) -> dict[str, Any]:
+    enriched = invoice.get("extraccion_enriquecida") or {}
+    validaciones = invoice.get("validaciones") or {}
+    qr_afip = invoice.get("qr_afip") or {}
+    origen = invoice.get("origen") or {}
+    estado = invoice.get("estado") or "OK"
+    requiere_revision = validaciones.get("requiere_revision", False) or estado == "REVIEW_REQUIRED"
+    is_duplicate = estado == "DUPLICADO"
+
+    campos_resumen: dict[str, Any] = {}
+    encontrados: list[str] = []
+    faltantes: list[str] = []
+
+    enriched_campos = (enriched.get("campos") or {}) if enriched else {}
+    for name in DIAGNOSTICO_FIELDS:
+        field = enriched_campos.get(name) or {}
+        valor = field.get("valor")
+        if valor not in (None, ""):
+            campos_resumen[name] = {
+                "valor": valor,
+                "fuente": field.get("fuente"),
+                "confianza": field.get("confianza"),
+                "metodo": field.get("metodo"),
+                "evidencia": field.get("evidencia"),
+            }
+            encontrados.append(name)
+        else:
+            campos_resumen[name] = {}
+            if name in (
+                "proveedor_cuit",
+                "tipo_comprobante",
+                "punto_venta",
+                "numero_comprobante",
+                "fecha_emision",
+                "total",
+            ):
+                faltantes.append(name)
+
+    fallas = list((enriched.get("validaciones") or {}).get("fallas") or [])
+    balance = (enriched.get("validaciones") or {}).get("balance_importes") or {}
+
+    if not qr_afip.get("detectado"):
+        pass
+
+    if is_duplicate:
+        recomendacion = "ignorar_duplicado"
+    elif requiere_revision and not invoice.get("ocr", {}).get("texto", "").strip():
+        recomendacion = "reintentar"
+    elif requiere_revision:
+        recomendacion = "revisar_manualmente"
+    else:
+        recomendacion = "aceptar"
+
+    return {
+        "requiere_revision": requiere_revision,
+        "estado": estado,
+        "qr_detectado": bool(qr_afip.get("detectado")),
+        "pdf_text_chars": len(origen.get("pdf_text") or str(enriched.get("fuentes", {}).get("pdf_text") or "")),
+        "ocr_text_chars": len(origen.get("ocr_text") or str(enriched.get("fuentes", {}).get("ocr_text") or "")),
+        "campos_criticos": {
+            "encontrados": encontrados,
+            "faltantes": faltantes,
+        },
+        "campos": campos_resumen,
+        "fallas": fallas,
+        "balance_importes": balance,
+        "recomendacion": recomendacion,
+    }
 
 
 def build_invoice_xml(invoice: dict[str, Any]) -> str:
