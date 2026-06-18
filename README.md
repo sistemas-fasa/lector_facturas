@@ -20,6 +20,15 @@ python -m pytest -q
 python -m compileall invoice_parser_helpers.py host_invoice_parser_service.py invoice_parser_runtime.py factura_ocr
 ```
 
+## Arquitectura híbrida
+
+Ver `docs/architecture.md` para el detalle de la arquitectura:
+
+- **Pipeline determinístico** (siempre activo): QR AFIP → PDF text → OCR Tesseract
+  → reglas locales → validación cruzada → staging MySQL.
+- **Fallback IA** (desactivado por defecto): opcional, solo para casos
+  `REVIEW_REQUIRED`, nunca reemplaza datos del QR AFIP.
+
 ## Seguridad
 
 No versionar `.env`, adjuntos reales, reportes OCR, JSON/XML generados ni colas
