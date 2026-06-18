@@ -2,10 +2,22 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import json
+import os
+from pathlib import Path
+
 from invoice_parser_helpers import (
+    INVOICE_PROVIDER_PROFILES_ENV_VAR,
     _advanced_line_items,
+    _apply_provider_profile,
+    _extract_amount_after_label,
+    _extract_date_after_label,
+    _extract_text_after_label,
+    _load_provider_profiles,
     _replace_invoice_staging_iibb_perceptions,
     _sane_iibb_amount,
+    _select_provider_profile,
+    build_invoice_json,
     extract_total,
 )
 from factura_ocr.extract import extract_invoice_data
@@ -204,3 +216,387 @@ def test_advanced_line_items_skips_fiscal_summary_rows() -> None:
             "subtotal": 1047861.6,
         }
     ]
+
+
+# ========== Provider profiles ==========
+
+PROFILE_JSON = json.dumps({
+    "proveedores": {
+        "30500000070": {
+            "nombre": "Proveedor Demo S.A.",
+            "aliases": ["PROVEEDOR DEMO", "DEMO SA"],
+            "campos": {
+                "total": ["TOTAL A PAGAR", "IMPORTE TOTAL"],
+                "neto_gravado": ["NETO GRAVADO"],
+                "iva_21": ["IVA 21%"],
+                "percepciones_iibb": ["PERC. IIBB"],
+                "cae": ["CAE"],
+                "vencimiento_cae": ["VTO CAE"],
+            },
+            "tolerancia_total": "1.00",
+        },
+        "30777777771": {
+            "nombre": "Distribuidora Ejemplo SRL",
+            "aliases": ["DISTRIBUIDORA EJEMPLO"],
+            "campos": {
+                "total": ["TOTAL COMPROBANTE"],
+                "neto_gravado": ["NETO"],
+            },
+        },
+    },
+    "aliases_globales": {
+        "DEMO SA": "30500000070",
+    },
+})
+
+SAMPLE_OCR = (
+    "PROVEEDOR DEMO SA\n"
+    "CUIT: 30-50000007-0\n"
+    "FACTURA A 0003-00000042\n"
+    "NETO GRAVADO: $ 1000,00\n"
+    "IVA 21%: $ 210,00\n"
+    "PERC. IIBB: $ 30,00\n"
+    "TOTAL A PAGAR: $ 1240,00\n"
+    "CAE: 12345678901234\n"
+    "VTO CAE: 30/06/2026\n"
+)
+
+
+# --- carga de perfiles ---
+
+def test_load_profiles_no_env_var(monkeypatch) -> None:
+    monkeypatch.delenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, raising=False)
+    assert _load_provider_profiles() == {}
+
+
+def test_load_profiles_file_not_found(monkeypatch) -> None:
+    monkeypatch.setenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, "/no/existe/profiles.json")
+    assert _load_provider_profiles() == {}
+
+
+def test_load_profiles_invalid_json(monkeypatch, tmp_path) -> None:
+    f = tmp_path / "profiles.json"
+    f.write_text("{invalid json}", encoding="utf-8")
+    monkeypatch.setenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, str(f))
+    assert _load_provider_profiles() == {}
+
+
+def test_load_profiles_valid_json(monkeypatch, tmp_path) -> None:
+    f = tmp_path / "profiles.json"
+    f.write_text(PROFILE_JSON, encoding="utf-8")
+    monkeypatch.setenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, str(f))
+    data = _load_provider_profiles()
+    assert "proveedores" in data
+    assert "30500000070" in data["proveedores"]
+
+
+def test_load_profiles_not_a_dict(monkeypatch, tmp_path) -> None:
+    f = tmp_path / "profiles.json"
+    f.write_text('["not a dict"]', encoding="utf-8")
+    monkeypatch.setenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, str(f))
+    assert _load_provider_profiles() == {}
+
+
+# --- selección de perfil ---
+
+def test_select_profile_by_qr_cuit() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile, method, cuit = _select_provider_profile(data, "30500000070", None, "")
+    assert method == "qr_cuit"
+    assert profile["nombre"] == "Proveedor Demo S.A."
+
+
+def test_select_profile_by_text_cuit() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile, method, cuit = _select_provider_profile(data, None, "30-50000007-0", "")
+    assert method == "text_cuit"
+    assert profile["nombre"] == "Proveedor Demo S.A."
+
+
+def test_select_profile_by_alias() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile, method, cuit = _select_provider_profile(data, None, None, "PROVEEDOR DEMO SA factura")
+    assert method == "alias"
+    assert profile["nombre"] == "Proveedor Demo S.A."
+
+
+def test_select_profile_qr_prioritary_over_alias() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile, method, cuit = _select_provider_profile(data, "30500000070", None, "PROVEEDOR DEMO SA")
+    assert method == "qr_cuit"
+
+
+def test_select_profile_ambiguous_alias() -> None:
+    data = {
+        "proveedores": {
+            "11111111111": {"nombre": "A", "aliases": ["ALIAS COMUN"]},
+            "22222222222": {"nombre": "B", "aliases": ["ALIAS COMUN"]},
+        },
+    }
+    profile, method, cuit = _select_provider_profile(data, None, None, "TEXTO CON ALIAS COMUN")
+    assert method == "alias_ambiguo"
+    assert profile is None
+
+
+def test_select_profile_no_match() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile, method, cuit = _select_provider_profile(data, None, None, "TEXTO IRRELEVANTE")
+    assert method == "sin_perfil"
+    assert profile is None
+
+
+# --- extracción por perfil ---
+
+def test_extract_amount_after_label() -> None:
+    val = _extract_amount_after_label("TOTAL A PAGAR: $ 1240,00", "TOTAL A PAGAR")
+    assert val == 1240.00
+
+
+def test_extract_amount_after_label_no_match() -> None:
+    val = _extract_amount_after_label("SIN IMPORTE", "TOTAL")
+    assert val is None
+
+
+def test_extract_date_after_label() -> None:
+    val = _extract_date_after_label("VTO CAE: 30/06/2026", "VTO CAE")
+    assert val == "30/06/2026"
+
+
+def test_extract_date_after_label_no_match() -> None:
+    val = _extract_date_after_label("SIN FECHA", "VTO CAE")
+    assert val is None
+
+
+def test_extract_text_after_label() -> None:
+    val = _extract_text_after_label("CAE: 12345678901234", "CAE")
+    assert val == "12345678901234"
+
+
+def test_apply_profile_extracts_total() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile = data["proveedores"]["30500000070"]
+    campos: dict = {}
+    _apply_provider_profile(
+        enriched_campos=campos,
+        ocr_text=SAMPLE_OCR,
+        pdf_text="",
+        profile=profile,
+        match_method="qr_cuit",
+        matched_cuit="30500000070",
+    )
+    assert campos.get("total", {}).get("valor") == "1240.00"
+    assert campos["total"]["fuente"] == "perfil_proveedor"
+
+
+def test_apply_profile_extracts_neto_gravado() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile = data["proveedores"]["30500000070"]
+    campos: dict = {}
+    _apply_provider_profile(
+        enriched_campos=campos,
+        ocr_text=SAMPLE_OCR,
+        pdf_text="",
+        profile=profile,
+        match_method="qr_cuit",
+        matched_cuit="30500000070",
+    )
+    assert campos.get("neto_gravado", {}).get("valor") == "1000.00"
+
+
+def test_apply_profile_extracts_iva_21() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile = data["proveedores"]["30500000070"]
+    campos: dict = {}
+    _apply_provider_profile(
+        enriched_campos=campos,
+        ocr_text=SAMPLE_OCR,
+        pdf_text="",
+        profile=profile,
+        match_method="qr_cuit",
+        matched_cuit="30500000070",
+    )
+    assert campos.get("iva_21", {}).get("valor") == "210.00"
+
+
+def test_apply_profile_extracts_percepciones_iibb() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile = data["proveedores"]["30500000070"]
+    campos: dict = {}
+    _apply_provider_profile(
+        enriched_campos=campos,
+        ocr_text=SAMPLE_OCR,
+        pdf_text="",
+        profile=profile,
+        match_method="qr_cuit",
+        matched_cuit="30500000070",
+    )
+    assert campos.get("percepciones_iibb", {}).get("valor") == "30.00"
+
+
+def test_apply_profile_extracts_cae() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile = data["proveedores"]["30500000070"]
+    campos: dict = {}
+    _apply_provider_profile(
+        enriched_campos=campos,
+        ocr_text=SAMPLE_OCR,
+        pdf_text="",
+        profile=profile,
+        match_method="qr_cuit",
+        matched_cuit="30500000070",
+    )
+    assert campos.get("cae", {}).get("valor") == "12345678901234"
+
+
+def test_apply_profile_does_not_override_high_confidence_qr() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile = data["proveedores"]["30500000070"]
+    campos = {
+        "total": {"valor": "1245.00", "confianza": 98, "fuente": "qr", "metodo": "qr_importe", "evidencia": ""},
+    }
+    _apply_provider_profile(
+        enriched_campos=campos,
+        ocr_text=SAMPLE_OCR,
+        pdf_text="",
+        profile=profile,
+        match_method="qr_cuit",
+        matched_cuit="30500000070",
+    )
+    assert campos["total"]["valor"] == "1245.00"
+    assert campos["total"]["fuente"] == "qr"
+
+
+def test_apply_profile_fills_empty_field() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile = data["proveedores"]["30500000070"]
+    campos = {
+        "total": {"valor": None, "confianza": 0, "fuente": "vacio", "metodo": "not_found", "evidencia": ""},
+    }
+    _apply_provider_profile(
+        enriched_campos=campos,
+        ocr_text=SAMPLE_OCR,
+        pdf_text="",
+        profile=profile,
+        match_method="qr_cuit",
+        matched_cuit="30500000070",
+    )
+    assert campos["total"]["valor"] == "1240.00"
+    assert campos["total"]["fuente"] == "perfil_proveedor"
+
+
+def test_apply_profile_has_evidence() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile = data["proveedores"]["30500000070"]
+    campos: dict = {}
+    _apply_provider_profile(
+        enriched_campos=campos,
+        ocr_text=SAMPLE_OCR,
+        pdf_text="",
+        profile=profile,
+        match_method="qr_cuit",
+        matched_cuit="30500000070",
+    )
+    assert "etiqueta" in (campos.get("total", {}).get("evidencia") or "")
+    assert campos["total"]["metodo"] == "profile_label_total"
+
+
+# --- perfil en build_invoice_json ---
+
+def test_build_invoice_json_with_profile(monkeypatch, tmp_path) -> None:
+    f = tmp_path / "profiles.json"
+    f.write_text(PROFILE_JSON, encoding="utf-8")
+    monkeypatch.setenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, str(f))
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_OCR,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="aabbccdd" + "0" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_OCR,
+    )
+    extraccion = invoice.get("extraccion_enriquecida") or {}
+    perfil = extraccion.get("perfil_proveedor_aplicado")
+    assert perfil is not None, "perfil_proveedor_aplicado deberia estar presente"
+    assert perfil["cuit"] in ("30500000070",)
+    assert perfil["matched_by"] in ("text_cuit",)
+
+
+def test_build_invoice_json_without_profile_has_no_perfil_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, raising=False)
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_OCR,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="bbccddee" + "1" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_OCR,
+    )
+    extraccion = invoice.get("extraccion_enriquecida") or {}
+    assert "perfil_proveedor_aplicado" not in extraccion
+
+
+def test_build_invoice_json_invalid_profile_does_not_break(monkeypatch, tmp_path) -> None:
+    f = tmp_path / "bad.json"
+    f.write_text("{invalid json}", encoding="utf-8")
+    monkeypatch.setenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, str(f))
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_OCR,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="ccddeeff" + "2" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_OCR,
+    )
+    assert invoice["estado"] in ("OK", "REVIEW_REQUIRED")
+
+
+# --- extractores unitarios ---
+
+def test_extract_amount_after_label_with_pesos() -> None:
+    assert _extract_amount_after_label("Total: $ 1500,50", "Total") == 1500.50
+
+
+def test_extract_amount_after_label_with_colon() -> None:
+    assert _extract_amount_after_label("NETO GRAVADO: 850,75", "NETO GRAVADO") == 850.75
+
+
+def test_extract_amount_after_label_with_hash() -> None:
+    assert _extract_amount_after_label("TOTAL A PAGAR# 2000,00", "TOTAL A PAGAR") == 2000.00
+
+
+def test_extract_date_after_label_with_dash() -> None:
+    assert _extract_date_after_label("Vencimiento CAE: 15-07-2026", "Vencimiento CAE") == "15/07/2026"
+
+
+def test_extract_text_after_label_no_colon() -> None:
+    val = _extract_text_after_label("CAE 12345678901234", "CAE")
+    assert val is None
+
+
+def test_global_alias_matches() -> None:
+    data = json.loads(PROFILE_JSON)
+    profile, method, cuit = _select_provider_profile(data, None, None, "FACTURA DE DEMO SA")
+    assert method == "alias"
+    assert cuit == "30500000070"
+
+
+def test_profile_diagnostico_includes_perfil(monkeypatch, tmp_path) -> None:
+    f = tmp_path / "profiles.json"
+    f.write_text(PROFILE_JSON, encoding="utf-8")
+    monkeypatch.setenv(INVOICE_PROVIDER_PROFILES_ENV_VAR, str(f))
+    invoice = build_invoice_json(
+        ocr_text=SAMPLE_OCR,
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="eeff0011" + "3" * 56,
+        ocr_engine="pdf_text",
+        pdf_text=SAMPLE_OCR,
+    )
+    diag = invoice.get("diagnostico") or {}
+    perfil = diag.get("perfil_proveedor_aplicado")
+    assert perfil is not None
+    assert "cuit" in perfil

@@ -42,6 +42,15 @@ El request debe ser `multipart/form-data` con el adjunto en el campo `file`.
 El polling IMAP interno del servicio Python existe solo como modo opcional o
 secundario. Ver `docs/n8n-email-ingestion.md` para el contrato completo.
 
+## Perfiles por Proveedor
+
+Ver `docs/provider-profiles.md`.
+
+Los perfiles permiten mejorar la extracción de campos por proveedor (total,
+neto, IVA, percepciones, CAE, etc.) sin modificar las reglas globales de
+parsing. Se configuran via `INVOICE_PROVIDER_PROFILES_FILE` y actúan como
+fallback controlado sin pisar datos confiables del QR AFIP.
+
 ## Seguridad
 
 No versionar `.env`, adjuntos reales, reportes OCR, JSON/XML generados ni colas

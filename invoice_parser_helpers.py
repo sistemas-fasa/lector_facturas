@@ -981,12 +981,42 @@ def build_invoice_json(
             detail = failure.get("detalle") or failure.get("codigo") or "Validacion enriquecida fallida"
             if detail not in invoice["validaciones"]["observaciones"]:
                 invoice["validaciones"]["observaciones"].append(detail)
+    profiles_data = _load_provider_profiles()
+    qr_data = _qr_afip_data(qr_afip)
+    profile_info = None
+    if profiles_data:
+        qr_cuit = str(qr_data.get("cuit") or "") if qr_data else None
+        text_cuit = invoice.get("emisor", {}).get("cuit")
+        profile, match_method, matched_cuit = _select_provider_profile(
+            profiles_data, qr_cuit, text_cuit, ocr_text,
+        )
+        if profile:
+            enriched_campos = enriched.get("campos") or {}
+            profile_results = _apply_provider_profile(
+                enriched_campos=enriched_campos,
+                ocr_text=ocr_text,
+                pdf_text=pdf_text,
+                profile=profile,
+                match_method=match_method,
+                matched_cuit=matched_cuit,
+            )
+            if profile_results:
+                profile_info = {
+                    "cuit": matched_cuit,
+                    "nombre": profile.get("nombre") or "",
+                    "matched_by": match_method,
+                    "campos_extraidos": profile_results,
+                }
+
     invoice["contabilidad"] = infer_accounting(invoice, advanced_invoice)
     provider_label = str((invoice.get("contabilidad") or {}).get("proveedor_nombre") or "").strip()
     if provider_label and not (invoice.get("contabilidad") or {}).get("observaciones"):
         if _looks_like_bad_business_name(str(invoice["emisor"].get("razon_social") or "")):
             invoice["emisor"]["razon_social"] = provider_label[:120]
     invoice["diagnostico"] = build_diagnostico(invoice)
+    if profile_info:
+        invoice.setdefault("extraccion_enriquecida", {})["perfil_proveedor_aplicado"] = profile_info
+        invoice["diagnostico"]["perfil_proveedor_aplicado"] = profile_info
     return invoice
 
 
@@ -1008,6 +1038,214 @@ DIAGNOSTICO_FIELDS = [
     "percepciones_iva",
     "otros_tributos",
 ]
+
+
+INVOICE_PROVIDER_PROFILES_ENV_VAR = "INVOICE_PROVIDER_PROFILES_FILE"
+
+_PROVIDER_PROFILES_CACHE: dict[str, Any] | None = None
+_PROVIDER_PROFILES_CACHE_PATH: str = ""
+
+
+def _load_provider_profiles() -> dict[str, Any]:
+    global _PROVIDER_PROFILES_CACHE, _PROVIDER_PROFILES_CACHE_PATH
+    path = os.environ.get(INVOICE_PROVIDER_PROFILES_ENV_VAR, "")
+    if not path:
+        return {}
+    if path == _PROVIDER_PROFILES_CACHE_PATH and _PROVIDER_PROFILES_CACHE is not None:
+        return _PROVIDER_PROFILES_CACHE
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            print(f"INVOICE_PROVIDER_PROFILES_FILE: JSON raiz no es un dict, ignorando", flush=True)
+            _PROVIDER_PROFILES_CACHE = {}
+            _PROVIDER_PROFILES_CACHE_PATH = path
+            return {}
+        profiles = data.get("proveedores") or {}
+        if not isinstance(profiles, dict):
+            print(f"INVOICE_PROVIDER_PROFILES_FILE: 'proveedores' no es un dict, ignorando", flush=True)
+            _PROVIDER_PROFILES_CACHE = {}
+            _PROVIDER_PROFILES_CACHE_PATH = path
+            return {}
+        _PROVIDER_PROFILES_CACHE = data
+        _PROVIDER_PROFILES_CACHE_PATH = path
+        return data
+    except FileNotFoundError:
+        _PROVIDER_PROFILES_CACHE = {}
+        _PROVIDER_PROFILES_CACHE_PATH = path
+        return {}
+    except json.JSONDecodeError as exc:
+        print(f"INVOICE_PROVIDER_PROFILES_FILE: JSON invalido: {exc}", flush=True)
+        _PROVIDER_PROFILES_CACHE = {}
+        _PROVIDER_PROFILES_CACHE_PATH = path
+        return {}
+    except Exception as exc:
+        print(f"INVOICE_PROVIDER_PROFILES_FILE: error inesperado: {exc}", flush=True)
+        _PROVIDER_PROFILES_CACHE = {}
+        _PROVIDER_PROFILES_CACHE_PATH = path
+        return {}
+
+
+def _select_provider_profile(
+    profiles_data: dict[str, Any],
+    qr_cuit: str | None,
+    text_cuit: str | None,
+    ocr_text: str,
+) -> tuple[dict[str, Any] | None, str, str | None]:
+    proveedores = (profiles_data or {}).get("proveedores") or {}
+    if not proveedores:
+        return None, "sin_perfil", None
+
+    global_aliases = (profiles_data or {}).get("aliases_globales") or {}
+
+    def _digits(c: str | None) -> str:
+        return re.sub(r"\D", "", c or "")
+
+    qr_digits = _digits(qr_cuit)
+    text_digits = _digits(text_cuit)
+
+    if qr_digits and qr_digits in proveedores:
+        return proveedores[qr_digits], "qr_cuit", qr_digits
+
+    if text_digits and text_digits in proveedores:
+        return proveedores[text_digits], "text_cuit", text_digits
+
+    if global_aliases:
+        text_upper = ocr_text.upper()
+        matched_by_alias: str | None = None
+        for alias, cuit in global_aliases.items():
+            if alias.upper() in text_upper:
+                if matched_by_alias is not None:
+                    return None, "alias_ambiguo", None
+                matched_by_alias = cuit
+        if matched_by_alias and matched_by_alias in proveedores:
+            return proveedores[matched_by_alias], "alias", matched_by_alias
+
+    alias_matches: list[tuple[str, dict[str, Any]]] = []
+    for cuit, perfil in proveedores.items():
+        aliases = perfil.get("aliases") or []
+        if not isinstance(aliases, list):
+            continue
+        text_upper = ocr_text.upper()
+        for alias in aliases:
+            if alias.upper() in text_upper:
+                alias_matches.append((cuit, perfil))
+                break
+    if len(alias_matches) > 1:
+        return None, "alias_ambiguo", None
+    if alias_matches:
+        return alias_matches[0][1], "alias", alias_matches[0][0]
+
+    return None, "sin_perfil", None
+
+
+def _extract_amount_after_label(text: str, label: str) -> float | None:
+    escaped = re.escape(label)
+    patterns = [
+        rf"{escaped}\s*[:#$]\s*\$?\s*([0-9][0-9.,]*)",
+        rf"{escaped}\s+([0-9][0-9.,]*)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            val = m.group(1).replace(".", "").replace(",", ".").strip()
+            try:
+                return float(val)
+            except ValueError:
+                continue
+    return None
+
+
+def _extract_date_after_label(text: str, label: str) -> str | None:
+    escaped = re.escape(label)
+    pat = rf"{escaped}\s*[:#]\s*(\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{2,4}})"
+    m = re.search(pat, text, re.I)
+    if m:
+        from datetime import date
+        parts = re.split(r"[/-]", m.group(1))
+        if len(parts) == 3:
+            d, mo, y = parts
+            y = "20" + y if len(y) == 2 else y
+            try:
+                date(int(y), int(mo), int(d))
+                return f"{d.rjust(2,'0')}/{mo.rjust(2,'0')}/{y}"
+            except ValueError:
+                pass
+    return None
+
+
+def _extract_text_after_label(text: str, label: str) -> str | None:
+    escaped = re.escape(label)
+    pat = rf"{escaped}\s*[:#]\s*(.+)"
+    m = re.search(pat, text, re.I)
+    if m:
+        val = m.group(1).strip()
+        if val:
+            return val[:120]
+    return None
+
+
+_PROFILE_FIELD_EXTRACTORS: dict[str, dict[str, Any]] = {
+    "total": {"extractor": _extract_amount_after_label, "formatter": lambda v: f"{v:.2f}"},
+    "neto_gravado": {"extractor": _extract_amount_after_label, "formatter": lambda v: f"{v:.2f}"},
+    "iva_21": {"extractor": _extract_amount_after_label, "formatter": lambda v: f"{v:.2f}"},
+    "iva_105": {"extractor": _extract_amount_after_label, "formatter": lambda v: f"{v:.2f}"},
+    "iva_27": {"extractor": _extract_amount_after_label, "formatter": lambda v: f"{v:.2f}"},
+    "percepciones_iibb": {"extractor": _extract_amount_after_label, "formatter": lambda v: f"{v:.2f}"},
+    "percepciones_iva": {"extractor": _extract_amount_after_label, "formatter": lambda v: f"{v:.2f}"},
+    "otros_tributos": {"extractor": _extract_amount_after_label, "formatter": lambda v: f"{v:.2f}"},
+    "cae": {"extractor": _extract_text_after_label, "formatter": lambda v: v},
+    "vencimiento_cae": {"extractor": _extract_date_after_label, "formatter": lambda v: v},
+    "proveedor_nombre": {"extractor": _extract_text_after_label, "formatter": lambda v: v},
+    "moneda": {"extractor": _extract_text_after_label, "formatter": lambda v: v},
+}
+
+
+def _apply_provider_profile(
+    *,
+    enriched_campos: dict[str, dict[str, Any]],
+    ocr_text: str,
+    pdf_text: str,
+    profile: dict[str, Any],
+    match_method: str,
+    matched_cuit: str | None,
+) -> dict[str, Any]:
+    combined = (ocr_text or "") + "\n" + (pdf_text or "")
+    perfil_campos = profile.get("campos") or {}
+    tolerancia = profile.get("tolerancia_total") or ""
+    results: dict[str, Any] = {}
+
+    for field_name, labels in perfil_campos.items():
+        if not isinstance(labels, list):
+            continue
+        spec = _PROFILE_FIELD_EXTRACTORS.get(field_name)
+        if not spec:
+            continue
+        existing = enriched_campos.get(field_name, _empty_field())
+        existing_val = existing.get("valor")
+        existing_conf = int(existing.get("confianza") or 0)
+        if existing_val not in (None, "") and existing_conf >= 80:
+            continue
+        for label in labels:
+            raw = spec["extractor"](combined, label)
+            if raw is not None:
+                formatted = spec["formatter"](raw)
+                enriched_campos[field_name] = _field(
+                    formatted, 80, "perfil_proveedor", f"profile_label_{field_name}",
+                    f"etiqueta '{label}' -> '{formatted}'",
+                )
+                results[field_name] = {"label": label, "valor": formatted}
+                break
+
+    if tolerancia:
+        try:
+            tol = Decimal(str(tolerancia))
+            if tol > 0:
+                enriched_campos.setdefault("_profile_tolerancia_total", _field(str(tol), 100, "perfil_proveedor", "profile_tolerancia", tolerancia))
+        except Exception:
+            pass
+
+    return results
 
 
 DOCUMENT_CLASSIFICATION_KEYWORDS: dict[str, list[str]] = {
