@@ -834,3 +834,75 @@ def test_classify_enqueue_factura_ok(monkeypatch, tmp_path) -> None:
         source_metadata={},
     )
     assert result["status"] == "QUEUED"
+
+
+# ========== write_invoice_staging conditional on document type ==========
+
+
+def test_process_upload_remito_skips_staging(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(service, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(service, "GENERATE_XML", False)
+    monkeypatch.setattr(service, "find_existing_invoice_result", lambda sha: None)
+    monkeypatch.setattr(service, "extract_afip_qr", lambda data, ext: None)
+    monkeypatch.setattr(service, "extract_text_sources", lambda data, ext: {
+        "combined_text": "REMITO Nº 001-0009999\nProveedor: TEST SA\nArticulo: x 10un",
+        "pdf_text": "REMITO Nº 001-0009999",
+        "ocr_text": "",
+        "engine": "pdf_text",
+    })
+
+    staging_called = False
+
+    def _fake_staging(inv, written):
+        nonlocal staging_called
+        staging_called = True
+        return {"enabled": True, "ok": True, "factura_id": 1}
+
+    monkeypatch.setattr(service, "write_invoice_staging", _fake_staging)
+
+    result = service.process_invoice_upload(
+        data=b"remito content",
+        source_type="email",
+        original_filename="remito_001.pdf",
+        mime_type="application/pdf",
+        source_metadata={},
+    )
+    staging = result.get("staging", {})
+    assert staging.get("ok") is False
+    assert staging.get("omitido_por_tipo") == "REMITO"
+    assert staging_called is False
+    assert result["requires_review"] is True
+
+
+def test_process_upload_factura_goes_to_staging(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(service, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(service, "GENERATE_XML", False)
+    monkeypatch.setattr(service, "find_existing_invoice_result", lambda sha: None)
+    monkeypatch.setattr(service, "extract_afip_qr", lambda data, ext: None)
+    monkeypatch.setattr(service, "extract_text_sources", lambda data, ext: {
+        "combined_text": SAMPLE_TEXT,
+        "pdf_text": SAMPLE_TEXT,
+        "ocr_text": "",
+        "engine": "pdf_text",
+    })
+
+    staging_called = False
+
+    def _fake_staging(inv, written):
+        nonlocal staging_called
+        staging_called = True
+        return {"enabled": True, "ok": True, "factura_id": 42}
+
+    monkeypatch.setattr(service, "write_invoice_staging", _fake_staging)
+
+    result = service.process_invoice_upload(
+        data=b"factura content",
+        source_type="email",
+        original_filename="factura_ok.pdf",
+        mime_type="application/pdf",
+        source_metadata={},
+    )
+    staging = result.get("staging", {})
+    assert staging.get("ok") is True
+    assert staging.get("factura_id") == 42
+    assert staging_called is True

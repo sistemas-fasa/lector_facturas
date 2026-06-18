@@ -590,7 +590,15 @@ def process_invoice_upload(
         ocr_text=text_sources["ocr_text"],
         combined_text=ocr_text,
     )
-    staging = write_invoice_staging(invoice, written)
+    if tipo_doc in NON_INVOICE_TYPES:
+        print(f"documento no fiscal ({tipo_doc}) — se omite staging para VFP", flush=True)
+        staging = {
+            "enabled": True, "ok": False, "factura_id": None,
+            "detalle_rows": 0, "percepcion_rows": 0, "error": "",
+            "omitido_por_tipo": tipo_doc,
+        }
+    else:
+        staging = write_invoice_staging(invoice, written)
     print(f"estado final: {invoice['estado']} staging_ok={staging.get('ok')} error={staging.get('error')}", flush=True)
     diagnostico = invoice.get("diagnostico") or build_diagnostico(invoice)
     return {
