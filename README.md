@@ -64,6 +64,21 @@ neto, IVA, percepciones, CAE, etc.) sin modificar las reglas globales de
 parsing. Se configuran via `INVOICE_PROVIDER_PROFILES_FILE` y actúan como
 fallback controlado sin pisar datos confiables del QR AFIP.
 
+## API interna de consulta (visor de facturas)
+
+El servicio expone endpoints GET para revisar facturas procesadas y estado
+de cola sin exponer OCR completo. Ver `docs/internal-query-api.md`.
+
+```
+GET /invoices              — listado con filtros y resumen
+GET /invoices/{id}         — detalle (OCR omitido)
+GET /invoices/by-sha/{sha} — búsqueda por SHA256
+GET /invoices/review       — atajo para requiere_revisión
+GET /queue/status          — estado de cola
+GET /queue/jobs            — listado de jobs
+GET /admin/invoices        — panel HTML
+```
+
 ## Seguridad
 
 No versionar `.env`, adjuntos reales, reportes OCR, JSON/XML generados ni colas
