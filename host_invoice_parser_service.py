@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging, build_diagnostico, write_debug_text_files
+from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging, build_diagnostico, write_debug_text_files, classify_document_type, NON_INVOICE_TYPES
 
 
 HOST = os.environ.get("INVOICE_HELPER_HOST", "172.17.0.1")
@@ -546,6 +546,28 @@ def process_invoice_upload(
         qr_afip=qr_afip,
         source_metadata=source_metadata,
     )
+
+    clasificacion = classify_document_type(
+        combined_text=ocr_text,
+        pdf_text=text_sources["pdf_text"],
+        ocr_text=text_sources["ocr_text"],
+        qr_afip=qr_afip,
+        filename=original_filename,
+        mime_type=mime_type,
+    )
+    invoice.setdefault("diagnostico", {})["clasificacion_documento"] = clasificacion
+    invoice.setdefault("origen", {})["clasificacion_documento"] = clasificacion
+
+    tipo_doc = clasificacion["tipo_documento"]
+    print(f"clasificacion documento: {tipo_doc} confianza={clasificacion['confianza']}", flush=True)
+
+    if tipo_doc in NON_INVOICE_TYPES:
+        invoice["validaciones"]["requiere_revision"] = True
+        invoice["validaciones"]["observaciones"].append(
+            f"Documento clasificado como {tipo_doc}; no se procesa como factura fiscal"
+        )
+        invoice["diagnostico"]["recomendacion"] = "ignorar_no_fiscal" if tipo_doc != "ILEGIBLE" else "reintentar"
+
     enriched = invoice.get("extraccion_enriquecida") or {}
     fields = enriched.get("campos") or {}
     found = [name for name, field in fields.items() if isinstance(field, dict) and field.get("fuente") != "vacio"]
@@ -553,9 +575,6 @@ def process_invoice_upload(
     print(f"campos encontrados: {', '.join(found)}", flush=True)
     if failures:
         print(f"validaciones fallidas: {json.dumps(failures, ensure_ascii=False)}", flush=True)
-    if not ocr_text.strip():
-        invoice["validaciones"]["requiere_revision"] = True
-        invoice["validaciones"]["observaciones"].append("No se pudo extraer texto del archivo")
 
     written = atomic_write_files(
         output_dir=OUTPUT_DIR,

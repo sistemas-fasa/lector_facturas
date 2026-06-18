@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch, call
 
 sys.modules.setdefault("cgi", types.SimpleNamespace(FieldStorage=object))
 import host_invoice_parser_service as service
-from invoice_parser_helpers import build_invoice_json, build_diagnostico, sha256_bytes, write_debug_text_files
+from invoice_parser_helpers import build_invoice_json, build_diagnostico, sha256_bytes, write_debug_text_files, classify_document_type
 
 
 SAMPLE_TEXT = """ACME SRL
@@ -632,6 +632,204 @@ def test_enqueue_invoice_job_preserves_ready_file_with_debug_enabled(monkeypatch
         data=b"new content",
         source_type="email",
         original_filename="test.pdf",
+        mime_type="application/pdf",
+        source_metadata={},
+    )
+    assert result["status"] == "QUEUED"
+
+
+# ========== document classification ==========
+
+def test_classify_factura_from_text() -> None:
+    result = classify_document_type(
+        combined_text="FACTURA A\nCUIT: 30-50000007-0\nCAE: 12345678901234\nTotal: $ 1245,00",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "FACTURA"
+    assert result["confianza"] >= 85
+    assert result["fuente"] == "regex"
+    assert result["requiere_revision"] is False
+
+
+def test_classify_nota_credito() -> None:
+    result = classify_document_type(
+        combined_text="NOTA DE CREDITO\nCUIT: 30-50000007-0\nTotal: $ 500,00",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "NOTA_CREDITO"
+    assert result["requiere_revision"] is False
+
+
+def test_classify_nota_debito() -> None:
+    result = classify_document_type(
+        combined_text="NOTA DE DEBITO ND\nCUIT: 30-50000007-0",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "NOTA_DEBITO"
+
+
+def test_classify_remito() -> None:
+    result = classify_document_type(
+        combined_text="REMITO N 00123\nCliente: FASA SRL\nCantidad: 10 unidades",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "REMITO"
+    assert result["requiere_revision"] is True
+
+
+def test_classify_comprobante_pago() -> None:
+    result = classify_document_type(
+        combined_text="COMPROBANTE DE PAGO\nBanco: Galicia\nCBU: 1234567890123456789012",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "COMPROBANTE_PAGO"
+    assert result["requiere_revision"] is True
+
+
+def test_classify_orden_compra() -> None:
+    result = classify_document_type(
+        combined_text="ORDEN DE COMPRA OC 456\nProveedor: ACME SRL",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "ORDEN_COMPRA"
+    assert result["requiere_revision"] is True
+
+
+def test_classify_otro_documento() -> None:
+    result = classify_document_type(
+        combined_text="Esto es un documento generico sin clasificacion",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "OTRO_DOCUMENTO"
+    assert result["requiere_revision"] is True
+
+
+def test_classify_ilegible_empty_text() -> None:
+    result = classify_document_type(
+        combined_text="",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "ILEGIBLE"
+    assert result["requiere_revision"] is True
+
+
+def test_classify_qr_afip_factura() -> None:
+    qr_afip = {
+        "detectado": True,
+        "url": "https://www.afip.gob.ar/fe/qr/?p=abc",
+        "datos": {"ver": 1, "cuit": 30500000070, "importe": 1245.00, "tipoCmp": 1},
+    }
+    result = classify_document_type(
+        combined_text="",
+        pdf_text="",
+        ocr_text="",
+        qr_afip=qr_afip,
+    )
+    assert result["tipo_documento"] == "FACTURA"
+    assert result["fuente"] == "qr_afip"
+    assert result["confianza"] >= 90
+    assert result["requiere_revision"] is False
+
+
+def test_classify_qr_afip_nota_credito() -> None:
+    qr_afip = {
+        "detectado": True,
+        "url": "https://www.afip.gob.ar/fe/qr/?p=abc",
+        "datos": {"ver": 1, "cuit": 30500000070, "importe": 500.00, "tipoCmp": 3},
+    }
+    result = classify_document_type(
+        combined_text="",
+        pdf_text="",
+        ocr_text="",
+        qr_afip=qr_afip,
+    )
+    assert result["tipo_documento"] == "NOTA_CREDITO"
+    assert result["fuente"] == "qr_afip"
+
+
+def test_classify_qr_afip_nota_debito() -> None:
+    qr_afip = {
+        "detectado": True,
+        "url": "https://www.afip.gob.ar/fe/qr/?p=abc",
+        "datos": {"ver": 1, "cuit": 30500000070, "importe": 200.00, "tipoCmp": 2},
+    }
+    result = classify_document_type(
+        combined_text="",
+        pdf_text="",
+        ocr_text="",
+        qr_afip=qr_afip,
+    )
+    assert result["tipo_documento"] == "NOTA_DEBITO"
+    assert result["fuente"] == "qr_afip"
+
+
+def test_classify_in_diagnostico() -> None:
+    invoice = build_invoice_json(
+        ocr_text="FACTURA A\nCUIT: 30-50000007-0\nCAE: 12345678901234\nTotal: $ 1245,00",
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="aa" * 32,
+        ocr_engine="pdf_text",
+        pdf_text="FACTURA A\nCUIT: 30-50000007-0\nCAE: 12345678901234\nTotal: $ 1245,00",
+    )
+    clasificacion = classify_document_type(
+        combined_text="FACTURA A\nCUIT: 30-50000007-0\nCAE: 12345678901234\nTotal: $ 1245,00",
+    )
+    invoice.setdefault("diagnostico", {})["clasificacion_documento"] = clasificacion
+    diag = build_diagnostico(invoice)
+    assert "clasificacion_documento" in diag
+    assert diag["clasificacion_documento"]["tipo_documento"] == "FACTURA"
+
+
+def test_classify_remito_not_ok_invoice(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(service, "QUEUE_DIR", tmp_path)
+    monkeypatch.setattr(service, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(service, "GENERATE_XML", False)
+    (tmp_path / "pendientes").mkdir(parents=True)
+    (tmp_path / "procesados").mkdir(parents=True)
+    (tmp_path / "errores").mkdir(parents=True)
+
+    result = service.enqueue_invoice_job(
+        data=b"REMITO N 001",
+        source_type="email",
+        original_filename="remito.pdf",
+        mime_type="application/pdf",
+        source_metadata={},
+    )
+    assert result["status"] != "OK"
+
+
+def test_classify_ilegible_recomienda_reintentar() -> None:
+    result = classify_document_type(
+        combined_text="",
+        pdf_text="",
+        ocr_text="",
+    )
+    assert result["tipo_documento"] == "ILEGIBLE"
+    assert result.get("requiere_revision", False) is True
+
+
+def test_classify_enqueue_factura_ok(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(service, "QUEUE_DIR", tmp_path)
+    monkeypatch.setattr(service, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(service, "GENERATE_XML", False)
+    (tmp_path / "pendientes").mkdir(parents=True)
+    (tmp_path / "procesados").mkdir(parents=True)
+    (tmp_path / "errores").mkdir(parents=True)
+
+    result = service.enqueue_invoice_job(
+        data=b"FACTURA A\nCAE: 12345678901234\nTotal: 1245,00",
+        source_type="email",
+        original_filename="factura.pdf",
         mime_type="application/pdf",
         source_metadata={},
     )

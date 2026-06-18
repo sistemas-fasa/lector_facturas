@@ -1010,6 +1010,217 @@ DIAGNOSTICO_FIELDS = [
 ]
 
 
+DOCUMENT_CLASSIFICATION_KEYWORDS: dict[str, list[str]] = {
+    "NOTA_CREDITO": [
+        "NOTA DE CREDITO", "NOTA DE CRÉDITO", "NOTA CREDITO", "NOTA CRÉDITO",
+        "NOTA DE CRED.", "NOTA CRED.",
+        "\\bNC\\b",
+    ],
+    "NOTA_DEBITO": [
+        "NOTA DE DEBITO", "NOTA DE DÉBITO", "NOTA DEBITO", "NOTA DÉBITO",
+        "NOTA DE DEB.", "NOTA DEB.",
+        "\\bND\\b",
+    ],
+    "FACTURA": [
+        "FACTURA",
+        "\\bFO\\d{2}\\b", "\\bFE\\b",
+        "COMPROBANTE A", "COMPROBANTE B", "COMPROBANTE C", "COMPROBANTE M",
+        "CAE N", "CAE NÚMERO", "CAE NUMERO",
+    ],
+    "REMITO": [
+        "REMITO", "RTO",
+        "COMPROBANTE DE ENTREGA",
+        "REMITO N",
+    ],
+    "COMPROBANTE_PAGO": [
+        "COMPROBANTE DE PAGO",
+        "RECIBO",
+        "PAGO REALIZADO",
+        "TRANSFERENCIA",
+        "MERCADO PAGO", "MERCADOPAGO",
+        "\\bCBU\\b", "\\bALIAS\\b",
+        "OPERACIÓN", "OPERACION",
+    ],
+    "ORDEN_COMPRA": [
+        "ORDEN DE COMPRA",
+        "\\bOC\\b",
+        "PURCHASE ORDER",
+        "PEDIDO DE COMPRA",
+    ],
+}
+
+DOCUMENT_TYPE_ORDER: list[str] = [
+    "NOTA_CREDITO",
+    "NOTA_DEBITO",
+    "FACTURA",
+    "REMITO",
+    "COMPROBANTE_PAGO",
+    "ORDEN_COMPRA",
+    "OTRO_DOCUMENTO",
+    "ILEGIBLE",
+]
+
+NON_INVOICE_TYPES: set[str] = {"REMITO", "COMPROBANTE_PAGO", "ORDEN_COMPRA", "OTRO_DOCUMENTO", "ILEGIBLE"}
+
+
+def classify_document_type(
+    *,
+    combined_text: str,
+    pdf_text: str = "",
+    ocr_text: str = "",
+    qr_afip: dict[str, Any] | None = None,
+    filename: str = "",
+    mime_type: str = "",
+) -> dict[str, Any]:
+    text = (combined_text or "").strip()
+    qr = qr_afip or {}
+
+    if qr.get("detectado") and qr.get("datos"):
+        tipo_doc_afip = _map_qr_tipo_cmp(qr)
+        if tipo_doc_afip:
+            return {
+                "tipo_documento": tipo_doc_afip,
+                "confianza": 95,
+                "fuente": "qr_afip",
+                "metodo": "qr_afip_detected",
+                "evidencia": f"QR AFIP tipo comprobante {qr.get('datos', {}).get('tipoCmp', 'desconocido')}",
+                "requiere_revision": False,
+            }
+        return {
+            "tipo_documento": "FACTURA",
+            "confianza": 90,
+            "fuente": "qr_afip",
+            "metodo": "qr_afip_detected",
+            "evidencia": "QR AFIP detectado con datos fiscales",
+            "requiere_revision": False,
+        }
+
+    if not text:
+        return {
+            "tipo_documento": "ILEGIBLE",
+            "confianza": 0,
+            "fuente": "empty",
+            "metodo": "no_text",
+            "evidencia": "no se pudo extraer texto del archivo",
+            "requiere_revision": True,
+        }
+
+    text_upper = text.upper()
+
+    for doc_type in DOCUMENT_TYPE_ORDER:
+        if doc_type == "OTRO_DOCUMENTO":
+            return {
+                "tipo_documento": "OTRO_DOCUMENTO",
+                "confianza": 60,
+                "fuente": "regex",
+                "metodo": "no_matching_keywords",
+                "evidencia": texto_truncado(text, 80),
+                "requiere_revision": True,
+            }
+        if doc_type == "ILEGIBLE":
+            continue
+
+        keywords = DOCUMENT_CLASSIFICATION_KEYWORDS.get(doc_type, [])
+        for kw in keywords:
+            if kw.startswith("\\b"):
+                if re.search(kw, text_upper):
+                    evidence = _match_evidence(text, kw)
+                    confianza = _confidence_for_type(doc_type)
+                    return {
+                        "tipo_documento": doc_type,
+                        "confianza": confianza,
+                        "fuente": "regex",
+                        "metodo": f"regex_{doc_type.lower()}",
+                        "evidencia": evidence,
+                        "requiere_revision": doc_type in NON_INVOICE_TYPES,
+                    }
+            else:
+                if kw in text_upper:
+                    evidence = _match_evidence(text, kw)
+                    confianza = _confidence_for_type(doc_type)
+                    return {
+                        "tipo_documento": doc_type,
+                        "confianza": confianza,
+                        "fuente": "regex",
+                        "metodo": f"regex_{doc_type.lower()}",
+                        "evidencia": evidence,
+                        "requiere_revision": doc_type in NON_INVOICE_TYPES,
+                    }
+
+    return {
+        "tipo_documento": "ILEGIBLE",
+        "confianza": 0,
+        "fuente": "empty",
+        "metodo": "no_text",
+        "evidencia": "no se pudo clasificar el documento",
+        "requiere_revision": True,
+    }
+
+
+def _map_qr_tipo_cmp(qr: dict[str, Any]) -> str | None:
+    datos = qr.get("datos") or {}
+    tipo_cmp = datos.get("tipoCmp")
+    if tipo_cmp is None:
+        return None
+    tipo_cmp = int(tipo_cmp) if isinstance(tipo_cmp, (int, float)) else tipo_cmp
+    mapping = {
+        1: "FACTURA",
+        2: "NOTA_DEBITO",
+        3: "NOTA_CREDITO",
+        6: "FACTURA",
+        7: "NOTA_DEBITO",
+        8: "NOTA_CREDITO",
+        11: "FACTURA",
+        12: "NOTA_DEBITO",
+        13: "NOTA_CREDITO",
+        15: "FACTURA",
+        19: "FACTURA",
+        20: "NOTA_DEBITO",
+        21: "NOTA_CREDITO",
+        34: "FACTURA",
+        35: "NOTA_DEBITO",
+        36: "NOTA_CREDITO",
+        39: "FACTURA",
+        40: "NOTA_DEBITO",
+        41: "NOTA_CREDITO",
+        43: "FACTURA",
+        44: "NOTA_DEBITO",
+        45: "NOTA_CREDITO",
+        49: "FACTURA",
+        50: "NOTA_DEBITO",
+        51: "NOTA_CREDITO",
+        52: "FACTURA",
+        53: "NOTA_DEBITO",
+        54: "NOTA_CREDITO",
+    }
+    return mapping.get(tipo_cmp)
+
+
+def _confidence_for_type(doc_type: str) -> int:
+    if doc_type in ("FACTURA", "NOTA_CREDITO", "NOTA_DEBITO"):
+        return 85
+    if doc_type == "REMITO":
+        return 80
+    return 75
+
+
+def _match_evidence(text: str, keyword: str, context: int = 60) -> str:
+    text_upper = text.upper()
+    idx = text_upper.find(keyword)
+    if idx == -1:
+        return texto_truncado(text, context)
+    start = max(0, idx - 10)
+    end = min(len(text), idx + len(keyword) + 30)
+    return texto_truncado(text[start:end], context)
+
+
+def texto_truncado(text: str, max_len: int = 80) -> str:
+    clean = " ".join(text.split())
+    if len(clean) <= max_len:
+        return clean
+    return clean[:max_len].rsplit(" ", 1)[0] + "…"
+
+
 def build_diagnostico(invoice: dict[str, Any]) -> dict[str, Any]:
     enriched = invoice.get("extraccion_enriquecida") or {}
     validaciones = invoice.get("validaciones") or {}
@@ -1063,7 +1274,7 @@ def build_diagnostico(invoice: dict[str, Any]) -> dict[str, Any]:
     else:
         recomendacion = "aceptar"
 
-    return {
+    result: dict[str, Any] = {
         "requiere_revision": requiere_revision,
         "estado": estado,
         "qr_detectado": bool(qr_afip.get("detectado")),
@@ -1078,6 +1289,10 @@ def build_diagnostico(invoice: dict[str, Any]) -> dict[str, Any]:
         "balance_importes": balance,
         "recomendacion": recomendacion,
     }
+    clasificacion = invoice.get("diagnostico", {}).get("clasificacion_documento")
+    if clasificacion:
+        result["clasificacion_documento"] = clasificacion
+    return result
 
 
 def build_invoice_xml(invoice: dict[str, Any]) -> str:
