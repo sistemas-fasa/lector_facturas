@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging, build_diagnostico, write_debug_text_files, classify_document_type, NON_INVOICE_TYPES
 
 
-HOST = os.environ.get("INVOICE_HELPER_HOST", "172.17.0.1")
+HOST = os.environ.get("INVOICE_HELPER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("INVOICE_HELPER_PORT", "8765"))
 OUTPUT_DIR = os.environ.get("INVOICE_OUTPUT_DIR", "/home/ferreteria/n8n/data/facturas_parseadas")
 GENERATE_XML = os.environ.get("INVOICE_GENERATE_XML", "true").lower() == "true"
@@ -47,6 +47,97 @@ JOB_QUEUE: "queue.Queue[dict[str, object]]" = queue.Queue()
 IMAP_POLL_ENABLED = os.environ.get("INVOICE_EMAIL_IMAP_POLL_ENABLED", "false").lower() == "true"
 IMAP_POLL_INTERVAL_SECONDS = int(os.environ.get("INVOICE_EMAIL_IMAP_POLL_INTERVAL_SECONDS", "60"))
 ADMIN_TOKEN = os.environ.get("INVOICE_ADMIN_TOKEN", "")
+
+CONTENT_TYPE_MAP: dict[str, str] = {
+    ".pdf": "application/pdf",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".json": "application/json; charset=utf-8",
+    ".xml": "application/xml; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
+def _resolve_invoice_file(invoice: dict[str, object], file_type: str, debug_subtype: str | None = None) -> Path | None:
+    base = Path(str(OUTPUT_DIR)).resolve()
+    sha = str((invoice.get("origen") or {}).get("sha256", "") or "")
+    sha8 = sha[:8]
+
+    if file_type == "json":
+        if sha8:
+            found = sorted(base.glob(f"FACTURA_*_{sha8}.json"))
+            if found:
+                p = found[0].resolve()
+                if str(p).startswith(str(base) + os.sep):
+                    return p
+    elif file_type == "xml":
+        if sha8:
+            found = sorted(base.glob(f"FACTURA_*_{sha8}.xml"))
+            if found:
+                p = found[0].resolve()
+                if str(p).startswith(str(base) + os.sep):
+                    return p
+    elif file_type == "original":
+        if sha:
+            for ext in (".pdf", ".jpg", ".jpeg", ".png"):
+                p = (base / "originales" / f"{sha}{ext}").resolve()
+                if p.exists() and str(p).startswith(str(base) + os.sep):
+                    return p
+    elif file_type == "debug" and debug_subtype:
+        if sha8:
+            names = {
+                "combined-text": f"{sha8}_combined_text.txt",
+                "diagnostico": f"{sha8}_diagnostico.json",
+                "qr": f"{sha8}_qr.json",
+                "pdf_text": f"{sha8}_pdf_text.txt",
+                "ocr_text": f"{sha8}_ocr_text.txt",
+            }
+            name = names.get(debug_subtype)
+            if name:
+                p = (base / name).resolve()
+                if p.exists() and str(p).startswith(str(base) + os.sep):
+                    return p
+    return None
+
+
+def _content_type_for_path(file_path: Path) -> str:
+    return CONTENT_TYPE_MAP.get(file_path.suffix.lower(), "application/octet-stream")
+
+
+_DBG_LABEL_MAP: dict[str, str] = {
+    "combined-text": "Texto combinado",
+    "diagnostico": "Diagnóstico",
+    "qr": "QR",
+    "pdf_text": "Texto PDF",
+    "ocr_text": "Texto OCR",
+}
+
+_DBG_FILE_SUFFIX_MAP: dict[str, str] = {
+    "_combined_text.txt": "combined-text",
+    "_diagnostico.json": "diagnostico",
+    "_qr.json": "qr",
+    "_pdf_text.txt": "pdf_text",
+    "_ocr_text.txt": "ocr_text",
+}
+
+
+def _file_link_html(invoice_id: str, file_type: str, exists: bool) -> str:
+    if not exists:
+        return "No disponible"
+    return f'<a href="/invoices/{invoice_id}/files/{file_type}" target="_blank">Ver {file_type}</a>'
+
+
+def _debug_links_html(invoice_id: str, debug_paths: list[str]) -> str:
+    parts: list[str] = []
+    for dbg_path in debug_paths:
+        name = Path(dbg_path).name
+        for suffix, subtype in _DBG_FILE_SUFFIX_MAP.items():
+            if name.endswith(suffix):
+                label = _DBG_LABEL_MAP.get(subtype, subtype)
+                parts.append(f'<a href="/invoices/{invoice_id}/files/debug/{subtype}" target="_blank">{label}</a>')
+                break
+    return "<br>".join(parts) if parts else "No disponible"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -73,6 +164,32 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/invoices/by-sha/"):
             sha = path.split("/invoices/by-sha/", 1)[1]
             self._handle_invoice_by_sha(sha)
+            return
+        m = re.match(r"^/invoices/(\d+)/files/(original|json|xml|debug(?:/combined-text|/diagnostico|/qr|/pdf_text|/ocr_text)?)$", path)
+        if m:
+            invoice_id = m.group(1)
+            file_spec = m.group(2)
+            debug_subtype = file_spec.split("/", 1)[1] if "/" in file_spec else None
+            file_type = file_spec.split("/", 1)[0]
+            invoice = _load_invoice_by_id(OUTPUT_DIR, invoice_id)
+            if invoice is None:
+                self.send_json({"error": "Factura no encontrada", "status": "ERROR"}, status=404)
+                return
+            self._serve_invoice_file(invoice, file_type, debug_subtype)
+            return
+        m = re.match(r"^/files/(original|json|xml|debug)/([0-9a-fA-F]{6,64})(?:/(combined-text|diagnostico|qr|pdf_text|ocr_text))?$", path)
+        if m:
+            file_type = m.group(1)
+            sha = m.group(2)
+            debug_subtype = m.group(3)
+            if file_type == "debug" and not debug_subtype:
+                self.send_json({"error": "Tipo de debug requerido (combined-text, diagnostico, qr, pdf_text, ocr_text)", "status": "ERROR"}, status=400)
+                return
+            invoice = _load_invoice_by_sha(OUTPUT_DIR, sha)
+            if invoice is None:
+                self.send_json({"error": "Factura no encontrada por SHA", "status": "ERROR"}, status=404)
+                return
+            self._serve_invoice_file(invoice, file_type, debug_subtype)
             return
         if path.startswith("/invoices/"):
             invoice_id = path.split("/invoices/", 1)[1]
@@ -379,7 +496,6 @@ class Handler(BaseHTTPRequestHandler):
         dg = detail.get("diagnostico", {})
         ee = detail.get("extraccion_enriquecida", {})
         fs = detail.get("files", {})
-        has_debug = "Si" if fs.get("has_debug") else "No"
         html_out = _ADMIN_DETAIL_HTML_TEMPLATE.format(
             volver='<a href="/admin/invoices">&larr; Volver al listado</a>',
             id=e(str(invoice_id)),
@@ -412,15 +528,29 @@ class Handler(BaseHTTPRequestHandler):
             email_date=e(str(o.get("email", {}).get("date", "") or "")),
             source_type=e(str(o.get("tipo", "") or "")),
             archivo_original=e(str(o.get("archivo_original", "") or "")),
-            json_file=e(str(fs.get("json_file", "") or "")),
-            xml_file=e(str(fs.get("xml_file", "") or "")),
-            original_file=e(str(fs.get("original_file", "") or "")),
-            has_original="Si" if fs.get("has_original") else "No",
-            has_debug=has_debug,
+            json_link=_file_link_html(invoice_id, "json", bool(fs.get("json_file"))),
+            xml_link=_file_link_html(invoice_id, "xml", bool(fs.get("xml_file"))),
+            original_link=_file_link_html(invoice_id, "original", bool(fs.get("has_original"))),
+            debug_links=_debug_links_html(invoice_id, fs.get("debug_files", [])),
             ocr_text_omitted="Si" if detail.get("ocr_text_omitted") else "No",
             ocr_chars=e(str(detail.get("ocr_chars", "") or "")),
         )
         self._serve_html(html_out)
+
+    def _serve_invoice_file(self, invoice: dict[str, object], file_type: str, debug_subtype: str | None = None) -> None:
+        file_path = _resolve_invoice_file(invoice, file_type, debug_subtype)
+        if file_path is None or not file_path.exists():
+            self.send_json({"error": "Archivo no encontrado", "status": "ERROR"}, status=404)
+            return
+        data = file_path.read_bytes()
+        content_type = _content_type_for_path(file_path)
+        safe_name = Path(file_path).name
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'inline; filename="{safe_name}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _serve_html(self, html_content: str, status: int = 200) -> None:
         body = html_content.encode("utf-8")
@@ -1693,9 +1823,6 @@ a:hover{{text-decoration:underline}}
 <p style="font-size:0.8em;color:#999">
 API: <a href="/invoices">/invoices</a> | <a href="/queue/status">/queue/status</a>
 </p>
-<p style="font-size:0.8em;color:#999">
-TODO Issue #22: agregar endpoints seguros para visualizar/descargar originales y evidencia OCR.
-</p>
 </body>
 </html>"""
 
@@ -1775,19 +1902,15 @@ a:hover{{text-decoration:underline}}
 <tr><td>Email date</td><td>{email_date}</td></tr>
 </table>
 </div>
-<div class="card">
-<h2>Archivos</h2>
-<table class="detail">
-<tr><td>JSON</td><td class="path">{json_file}</td></tr>
-<tr><td>XML</td><td class="path">{xml_file}</td></tr>
-<tr><td>Original</td><td class="path">{original_file}</td></tr>
-<tr><td>Has original</td><td>{has_original}</td></tr>
-<tr><td>Has debug</td><td>{has_debug}</td></tr>
-</table>
-</div>
-<p style="font-size:0.8em;color:#999">
-TODO Issue #22: agregar endpoints seguros para visualizar/descargar originales y evidencia OCR.
-</p>
+        <div class="card">
+        <h2>Archivos</h2>
+        <table class="detail">
+        <tr><td>JSON</td><td>{json_link}</td></tr>
+        <tr><td>XML</td><td>{xml_link}</td></tr>
+        <tr><td>Original</td><td>{original_link}</td></tr>
+        <tr><td>Debug</td><td>{debug_links}</td></tr>
+        </table>
+        </div>
 </body>
 </html>"""
 
