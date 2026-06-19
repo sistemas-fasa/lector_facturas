@@ -2500,14 +2500,14 @@ def _guess_business_name(text: str) -> str:
     match = re.search(r"(?:^|\n)(?:PED\s*\n)?([A-ZÁÉÍÓÚÜÑ][^\n]{4,160}?)\s+CUIT\s*:", text or "", re.I)
     if match:
         candidate = match.group(1).strip()
-        if not re.fullmatch(r"[ABC]", candidate, re.I):
+        if not re.fullmatch(r"[ABC]", candidate, re.I) and "domicilio" not in candidate.lower():
             return candidate[:120]
 
     header = re.split(r"\b(?:CUIT|Cuit|Condicion\s+frente\s+al\s+IVA|Sr\.\(s\))\b", text or "", maxsplit=1)[0]
     for line in header.splitlines():
         clean = line.strip()
         if clean and not re.fullmatch(r"[ABC]", clean, re.I) and not re.search(
-            r"factura|cod\.|original|pagina|cuit|iva|fecha|total|software|punto de venta|comp\.?\s*nro|^n[º°ro.]*\s*:|^sr\.\(s\)|direcci[oó]n|localidad|provincia|forma de pago|articulo|descripci[oó]n|cantidad|importe|subtotal|transporte",
+            r"factura|cod\.|original|pagina|cuit|iva|fecha|total|software|punto de venta|comp\.?\s*nro|^n[º°ro.]*\s*:|^sr\.\(s\)|direcci[oó]n|domicilio|localidad|provincia|forma de pago|articulo|descripci[oó]n|cantidad|importe|subtotal|transporte",
             clean,
             re.I,
         ):
@@ -2521,7 +2521,7 @@ def _looks_like_bad_business_name(value: str) -> bool:
         return True
     return bool(
         re.search(
-            r"art[ií]culo|descripci[oó]n|cantidad|importe|unitario|factura\s+anticipada|^tecno\.?\s+[abcm]$|^s?rupo$",
+            r"art[ií]culo|descripci[oó]n|cantidad|importe|unitario|domicilio|factura\s+anticipada|^tecno\.?\s+[abcm]$|^s?rupo$",
             clean,
             re.I,
         )

@@ -17,6 +17,10 @@ from host_invoice_parser_service import (
     _scan_invoice_files,
     _compute_invoices_summary,
     _summarize_job,
+    _resolve_invoice_file,
+    _content_type_for_path,
+    _file_link_html,
+    _debug_links_html,
     OUTPUT_DIR,
 )
 
@@ -714,3 +718,349 @@ class TestSummarizeDetail:
         item = _invoice_list_item(str(f))
         assert item is not None
         assert len(item["fallas_principales"]) == 2
+
+
+class TestFileViewerHelpers:
+    def test_file_link_html_exists(self):
+        result = _file_link_html("1", "json", True)
+        assert "/invoices/1/files/json" in result
+        assert "Ver json" in result or "Ver JSON" in result
+        assert "No disponible" not in result
+
+    def test_file_link_html_not_exists(self):
+        result = _file_link_html("5", "original", False)
+        assert result == "No disponible"
+
+    def test_debug_links_html_empty(self):
+        result = _debug_links_html("1", [])
+        assert result == "No disponible"
+
+    def test_debug_links_html_with_files(self, tmp_path):
+        paths = [
+            str(tmp_path / "abcdef12_diagnostico.json"),
+            str(tmp_path / "abcdef12_combined_text.txt"),
+        ]
+        result = _debug_links_html("1", paths)
+        assert "/invoices/1/files/debug/diagnostico" in result
+        assert "/invoices/1/files/debug/combined-text" in result
+        assert "Diagnóstico" in result
+        assert "Texto combinado" in result
+        assert "No disponible" not in result
+
+
+class TestResolveInvoiceFile:
+    def test_resolve_json(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        invoice = dict(SAMPLE_INVOICE)
+        result = _resolve_invoice_file(invoice, "json")
+        assert result is not None
+        assert result.suffix == ".json"
+        assert "FACTURA_" in result.name
+
+    def test_resolve_xml(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        invoice = dict(SAMPLE_INVOICE)
+        result = _resolve_invoice_file(invoice, "xml")
+        assert result is not None
+        assert result.suffix == ".xml"
+
+    def test_resolve_original_missing(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        invoice = dict(SAMPLE_INVOICE)
+        result = _resolve_invoice_file(invoice, "original")
+        assert result is None
+
+    def test_resolve_original_exists(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        originals = Path(temp_output_dir) / "originales"
+        originals.mkdir(exist_ok=True)
+        sha = SAMPLE_INVOICE["origen"]["sha256"]
+        original_pdf = originals / f"{sha}.pdf"
+        original_pdf.write_bytes(b"%PDF-1.4 mock")
+        invoice = dict(SAMPLE_INVOICE)
+        result = _resolve_invoice_file(invoice, "original")
+        assert result is not None
+        assert result.suffix == ".pdf"
+        assert result.name == f"{sha}.pdf"
+
+    def test_resolve_debug(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        sha8 = SAMPLE_INVOICE["origen"]["sha256"][:8]
+        dbg = Path(temp_output_dir) / f"{sha8}_diagnostico.json"
+        dbg.write_text('{"ok": true}', encoding="utf-8")
+        invoice = dict(SAMPLE_INVOICE)
+        result = _resolve_invoice_file(invoice, "debug", "diagnostico")
+        assert result is not None
+        assert result.name == f"{sha8}_diagnostico.json"
+
+    def test_resolve_debug_not_found(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        invoice = dict(SAMPLE_INVOICE)
+        result = _resolve_invoice_file(invoice, "debug", "qr")
+        assert result is None
+
+    def test_resolve_invalid_type(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        invoice = dict(SAMPLE_INVOICE)
+        result = _resolve_invoice_file(invoice, "nonexistent")
+        assert result is None
+
+    def test_path_traversal_blocked(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", str(tmp_path))
+        safe_dir = tmp_path / "safe"
+        safe_dir.mkdir()
+        (safe_dir / "dummy.json").write_text("{}", encoding="utf-8")
+        invoice = {
+            "origen": {"sha256": "aa"},
+            "_staging_id": "99",
+        }
+        result = _resolve_invoice_file(invoice, "json")
+        assert result is None or not str(result).startswith(str(tmp_path / ".."))
+
+
+class TestContentTypeForPath:
+    def test_pdf(self):
+        assert _content_type_for_path(Path("x.pdf")) == "application/pdf"
+
+    def test_json(self):
+        assert _content_type_for_path(Path("x.json")) == "application/json; charset=utf-8"
+
+    def test_xml(self):
+        assert _content_type_for_path(Path("x.xml")) == "application/xml; charset=utf-8"
+
+    def test_png(self):
+        assert _content_type_for_path(Path("x.png")) == "image/png"
+
+    def test_jpg(self):
+        assert _content_type_for_path(Path("x.jpg")) == "image/jpeg"
+
+    def test_unknown(self):
+        assert _content_type_for_path(Path("x.xyz")) == "application/octet-stream"
+
+
+class TestFileViewerEndpoints:
+    @pytest.fixture
+    def handler_with_files(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        originals = Path(temp_output_dir) / "originales"
+        originals.mkdir(exist_ok=True)
+        # Create original files for all sample invoices
+        for sample in (SAMPLE_INVOICE, SAMPLE_INVOICE_REVIEW, SAMPLE_INVOICE_NC):
+            sha = sample["origen"]["sha256"]
+            (originals / f"{sha}.pdf").write_bytes(b"%PDF-1.4 invoice data")
+            sha8 = sha[:8]
+            (Path(temp_output_dir) / f"{sha8}_diagnostico.json").write_text(
+                '{"ok": true}', encoding="utf-8"
+            )
+            (Path(temp_output_dir) / f"{sha8}_combined_text.txt").write_text(
+                "linea 1\nlinea 2", encoding="utf-8"
+            )
+        from host_invoice_parser_service import Handler
+        inst = Handler.__new__(Handler)
+        inst.server_version = "Test/1.0"
+        inst.send_json_called = None
+        inst.send_error_called = None
+        inst.headers = {}
+        inst._response_status = None
+        inst._response_headers = []
+        inst._response_data = None
+        def send_json(payload, status=200):
+            inst.send_json_called = (payload, status)
+        def send_error(status):
+            inst.send_error_called = status
+        def send_response(status):
+            inst._response_status = status
+        def send_header(k, v):
+            inst._response_headers.append((k, v))
+        def end_headers():
+            pass
+        inst.send_json = send_json
+        inst.send_error = send_error
+        inst.send_response = send_response
+        inst.send_header = send_header
+        inst.end_headers = end_headers
+        inst.wfile = BytesIO()
+        return inst
+
+    def test_serve_original_by_id(self, handler_with_files):
+        handler = handler_with_files
+        handler.path = "/invoices/1/files/original"
+        handler.do_GET()
+        assert handler.send_json_called is None
+        assert handler._response_status == 200
+        ctype = dict(handler._response_headers).get("Content-Type", "")
+        assert "pdf" in ctype.lower()
+
+    def test_serve_json_by_id(self, handler_with_files):
+        handler = handler_with_files
+        handler.path = "/invoices/1/files/json"
+        handler.do_GET()
+        assert handler.send_json_called is None
+        assert handler._response_status == 200
+        ctype = dict(handler._response_headers).get("Content-Type", "")
+        assert "json" in ctype.lower()
+
+    def test_serve_xml_by_id(self, handler_with_files):
+        handler = handler_with_files
+        handler.path = "/invoices/1/files/xml"
+        handler.do_GET()
+        assert handler.send_json_called is None
+        assert handler._response_status == 200
+
+    def test_serve_debug_by_id(self, handler_with_files):
+        handler = handler_with_files
+        handler.path = "/invoices/1/files/debug/diagnostico"
+        handler.do_GET()
+        assert handler.send_json_called is None
+        assert handler._response_status == 200
+
+    def test_correct_content_type_png(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        originals = Path(temp_output_dir) / "originales"
+        originals.mkdir(exist_ok=True)
+        # ID 3 = SAMPLE_INVOICE (abcdef12...) after descending sort
+        sha = SAMPLE_INVOICE["origen"]["sha256"]
+        (originals / f"{sha}.pdf").unlink(missing_ok=True)
+        (originals / f"{sha}.png").write_bytes(b"\x89PNG mock")
+        from host_invoice_parser_service import Handler
+        inst = Handler.__new__(Handler)
+        inst.server_version = "Test/1.0"
+        inst.send_json_called = None
+        inst.send_error_called = None
+        inst.headers = {}
+        inst._response_status = None
+        inst._response_headers = []
+        def send_json(payload, status=200):
+            inst.send_json_called = (payload, status)
+        def send_error(status):
+            inst.send_error_called = status
+        def send_response(status):
+            inst._response_status = status
+        def send_header(k, v):
+            inst._response_headers.append((k, v))
+        def end_headers():
+            pass
+        inst.send_json = send_json
+        inst.send_error = send_error
+        inst.send_response = send_response
+        inst.send_header = send_header
+        inst.end_headers = end_headers
+        inst.wfile = BytesIO()
+        inst.path = "/invoices/3/files/original"
+        inst.do_GET()
+        assert inst.send_json_called is None
+        assert inst._response_status == 200
+        ctype = dict(inst._response_headers).get("Content-Type", "")
+        assert "image/png" in ctype.lower()
+
+    def test_serve_file_404(self, handler_with_files):
+        handler = handler_with_files
+        handler.path = "/invoices/99999/files/original"
+        handler.do_GET()
+        assert handler.send_json_called is not None
+        payload, status = handler.send_json_called
+        assert status == 404
+
+    def test_serve_file_invalid_id_returns_400(self, handler_with_files):
+        handler = handler_with_files
+        handler.path = "/invoices/abc/files/json"
+        handler.do_GET()
+        assert handler.send_json_called is not None
+        payload, status = handler.send_json_called
+        assert status == 400
+        assert "numerico" in str(payload.get("error", "")).lower()
+
+    def test_file_endpoints_require_auth(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        monkeypatch.setattr("host_invoice_parser_service.ADMIN_TOKEN", "secret123")
+        from host_invoice_parser_service import Handler
+        inst = Handler.__new__(Handler)
+        inst.server_version = "Test/1.0"
+        inst.send_json_called = None
+        inst.send_error_called = None
+        inst.headers = {}
+        def send_json(payload, status=200):
+            inst.send_json_called = (payload, status)
+        def send_error(status):
+            inst.send_error_called = status
+        inst.send_json = send_json
+        inst.send_error = send_error
+        inst.path = "/invoices/1/files/json"
+        inst.do_GET()
+        assert inst.send_json_called is not None
+        payload, status = inst.send_json_called
+        assert status == 401
+
+    def test_health_exempt_from_auth_on_file_routes(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.ADMIN_TOKEN", "secret123")
+        from host_invoice_parser_service import Handler
+        inst = Handler.__new__(Handler)
+        inst.server_version = "Test/1.0"
+        inst.send_json_called = None
+        inst.send_error_called = None
+        inst.headers = {}
+        def send_json(payload, status=200):
+            inst.send_json_called = (payload, status)
+        def send_error(status):
+            inst.send_error_called = status
+        inst.send_json = send_json
+        inst.send_error = send_error
+        inst.path = "/health"
+        inst.do_GET()
+        assert inst.send_json_called is not None
+        payload, status = inst.send_json_called
+        assert status == 200
+        assert payload["status"] == "OK"
+
+
+class TestAdminHTMLFileLinks:
+    @pytest.fixture
+    def handler(self, temp_output_dir: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("host_invoice_parser_service.OUTPUT_DIR", temp_output_dir)
+        originals = Path(temp_output_dir) / "originales"
+        originals.mkdir(exist_ok=True)
+        # Only create files for SAMPLE_INVOICE_NC (ID 1 after descending sort)
+        sha = SAMPLE_INVOICE_NC["origen"]["sha256"]
+        (originals / f"{sha}.pdf").write_bytes(b"%PDF mock")
+        sha8 = sha[:8]
+        (Path(temp_output_dir) / f"{sha8}_diagnostico.json").write_text(
+            '{"ok": true}', encoding="utf-8"
+        )
+        from host_invoice_parser_service import Handler
+        inst = Handler.__new__(Handler)
+        inst.server_version = "Test/1.0"
+        inst.send_json_called = None
+        inst.send_error_called = None
+        inst.send_html_called = None
+        inst.headers = {}
+        def send_json(payload, status=200):
+            inst.send_json_called = (payload, status)
+        def send_error(status):
+            inst.send_error_called = status
+        def serve_html(html_content, status=200):
+            inst.send_html_called = (html_content, status)
+        inst.send_json = send_json
+        inst.send_error = send_error
+        inst._serve_html = serve_html
+        return inst
+
+    def test_admin_detail_shows_file_links_when_files_exist(self, handler):
+        handler.path = "/admin/invoices/1"
+        handler.do_GET()
+        assert handler.send_html_called is not None
+        html_content, status = handler.send_html_called
+        assert status == 200
+        assert "/invoices/1/files/json" in html_content
+        assert "/invoices/1/files/xml" in html_content
+        assert "/invoices/1/files/original" in html_content
+        assert "/invoices/1/files/debug/diagnostico" in html_content
+        assert "Ver JSON" in html_content or "Ver json" in html_content
+        assert "No disponible" not in html_content
+
+    def test_admin_detail_shows_no_links_when_files_missing(self, handler):
+        handler.path = "/admin/invoices/2"
+        handler.do_GET()
+        assert handler.send_html_called is not None
+        html_content, status = handler.send_html_called
+        assert status == 200
+        assert "No disponible" in html_content

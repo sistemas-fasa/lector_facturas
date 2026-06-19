@@ -73,7 +73,41 @@ Requiere `INVOICE_ADMIN_TOKEN` si está configurado.
 ### `GET /admin/invoices/{id}`
 
 Detalle HTML de una factura con tarjetas por sección (datos principales,
-importes, diagnóstico, extracción, email/origen, archivos).
+importes, diagnóstico, extracción, email/origen, archivos). Los archivos
+disponibles se muestran como enlaces a los endpoints seguros de archivos.
+
+## File Viewer Endpoints
+
+Endpoints seguros para visualizar/descargar archivos de facturas sin acceso
+directo al filesystem. Proporcionan Content-Type correcto y Content-Disposition
+inline. El token `INVOICE_ADMIN_TOKEN` es requerido si está configurado.
+
+### `GET /invoices/{id}/files/{type}`
+
+Sirve un archivo por ID de factura.
+
+| `type` | Descripción |
+|---|---|
+| `json` | JSON de extracción |
+| `xml` | XML AFIP |
+| `original` | PDF/imagen original |
+| `debug/diagnostico` | Diagnóstico de OCR (JSON) |
+| `debug/combined-text` | Texto combinado (TXT) |
+| `debug/qr` | Datos QR (JSON) |
+| `debug/pdf_text` | Texto extraído del PDF (TXT) |
+| `debug/ocr_text` | Texto OCR completo (TXT) |
+
+### `GET /files/{type}/{sha256}`
+
+Sirve un archivo por SHA256. Útil cuando se conoce el hash pero no el ID.
+
+`type` puede ser `json`, `xml`, `original` o `debug`.
+
+### `GET /files/debug/{sha256}/{subtype}`
+
+Sirve un archivo de depuración por SHA256.
+
+`subtype`: `combined-text`, `diagnostico`, `qr`, `pdf_text`, `ocr_text`.
 
 ## Seguridad
 
@@ -107,8 +141,9 @@ o iptables para restringir origen.
 - **OCR no se expone**: los detalles JSON incluyen `ocr_text_omitted: true`
   y sólo reportan cantidad de caracteres (`ocr_chars`). El texto OCR completo
   no es accesible por API.
-- **Issue #22 pendiente**: no hay endpoints seguros para visualizar/descargar
-  archivos originales (PDF) ni evidencia OCR.
+- **Issue #22 resuelto**: endpoints seguros para visualizar/descargar
+  archivos originales (PDF/imagen) y evidencia OCR en `/invoices/{id}/files/*`
+  y `/files/{type}/{sha256}`.
 - **Read-only**: ningún endpoint GET modifica archivos, la cola o MySQL.
 - **Compatibilidad**: 100% backward compatible — no se modifican rutas POST
   (`/enqueue`, `/parse`) ni el formato multipart `file`.
