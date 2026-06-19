@@ -1,7 +1,8 @@
 """Small host-side invoice parser service for the n8n Docker instance.
 
 It avoids changing the n8n container when Docker/sudo access is unavailable.
-Bind it to docker0 (172.17.0.1) so only containers on the host can call it.
+Bind to 127.0.0.1 by default for safety; set INVOICE_HELPER_HOST=0.0.0.0
+to expose on all interfaces (requires INVOICE_ADMIN_TOKEN in production).
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from urllib.parse import parse_qs, urlparse
 from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging, build_diagnostico, write_debug_text_files, classify_document_type, NON_INVOICE_TYPES
 
 
-HOST = os.environ.get("INVOICE_HELPER_HOST", "0.0.0.0")
+HOST = os.environ.get("INVOICE_HELPER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("INVOICE_HELPER_PORT", "8765"))
 OUTPUT_DIR = os.environ.get("INVOICE_OUTPUT_DIR", "/home/ferreteria/n8n/data/facturas_parseadas")
 GENERATE_XML = os.environ.get("INVOICE_GENERATE_XML", "true").lower() == "true"
