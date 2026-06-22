@@ -20,8 +20,10 @@ FUNCTION OcrPendientes(lnConn, tcCursor)
     lcCursor = IIF(EMPTY(tcCursor), "curOcrPendientes", tcCursor)
     lcSql = ;
         "SELECT id, fecha_proceso, proveedor_codigo, proveedor_nombre, " + ;
-        "emisor_razon_social, emisor_cuit, comprobante_codigo, comprobante, fecha_emision, total, " + ;
-        "percepciones_iibb, " + ;
+        "emisor_razon_social, emisor_cuit, comprobante_codigo, letra, punto_venta, numero, " + ;
+        "comprobante, fecha_emision, cae, cae_vencimiento, moneda, " + ;
+        "neto_gravado, iva_21, iva_105, iva_27, exento, no_gravado, " + ;
+        "percepciones, percepciones_iibb, otros_impuestos, total, " + ;
         "cuenta_contable_sugerida, cuenta_descripcion_sugerida, score_sugerencia, " + ;
         "requiere_revision, observaciones " + ;
         "FROM vw_facturas_ocr_pendientes " + ;
