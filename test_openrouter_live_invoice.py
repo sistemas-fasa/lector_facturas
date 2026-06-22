@@ -13,7 +13,18 @@ from invoice_ai_extractor.service import extract_invoice_ai_first
 ROOT = Path(__file__).parent
 
 
-def _load_dotenv_override(path: Path) -> None:
+def _load_dotenv_with_env_precedence(path: Path) -> None:
+    explicit_env = {
+        key: os.environ[key]
+        for key in (
+            "OPENROUTER_MODEL",
+            "OPENROUTER_FALLBACK_MODEL",
+            "INVOICE_AI_ALLOW_FREE_MODELS",
+            "INVOICE_AI_TIMEOUT_SECONDS",
+            "INVOICE_AI_MAX_RETRIES",
+        )
+        if key in os.environ
+    }
     if not path.exists():
         return
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -22,6 +33,7 @@ def _load_dotenv_override(path: Path) -> None:
             continue
         key, value = raw.split("=", 1)
         os.environ[key.strip()] = value.strip().strip('"').strip("'")
+    os.environ.update(explicit_env)
 
 
 @pytest.mark.live_openrouter
@@ -29,7 +41,7 @@ def test_openrouter_reads_real_invoice_critical_fields_from_dotenv():
     if os.environ.get("RUN_OPENROUTER_LIVE_TESTS") != "1":
         pytest.skip("set RUN_OPENROUTER_LIVE_TESTS=1 to call OpenRouter with a real invoice")
 
-    _load_dotenv_override(ROOT / ".env")
+    _load_dotenv_with_env_precedence(ROOT / ".env")
     if not os.environ.get("OPENROUTER_API_KEY"):
         pytest.skip("OPENROUTER_API_KEY missing")
 

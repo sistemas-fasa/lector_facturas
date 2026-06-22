@@ -91,6 +91,33 @@ Flash levanta `punto_venta`, `codigo_afip`, numero, fecha, CUIT y total en una
 factura real. Si no cumple esos campos, el siguiente paso es renderizar el PDF
 como imagen antes de seguir ajustando prompts.
 
+### Validacion live con OpenRouter pago
+
+El test live usa la factura local
+`muestras_privadas/02.05.2026 - tte hd FACTURA N°23796.pdf` y valida campos
+criticos reales. Requiere `OPENROUTER_API_KEY` configurada en `.env` o en el
+entorno y creditos disponibles en OpenRouter.
+
+PowerShell:
+
+```powershell
+$env:RUN_OPENROUTER_LIVE_TESTS='1'
+$env:OPENROUTER_MODEL='google/gemini-2.5-flash'
+$env:OPENROUTER_FALLBACK_MODEL=''
+$env:INVOICE_AI_ALLOW_FREE_MODELS='false'
+python -m pytest test_openrouter_live_invoice.py -q
+```
+
+Para probar la opcion economica, cambiar solo:
+
+```powershell
+$env:OPENROUTER_MODEL='google/gemini-2.5-flash-lite'
+```
+
+El PR no debe salir de draft hasta que el test live pase con un modelo pago
+fijo. Si falla por campos fiscales faltantes, el siguiente paso es renderizar el
+PDF como imagen antes de seguir tocando prompts.
+
 ## Ingesta de correo con n8n
 
 El flujo productivo recomendado para correo es n8n como lector/orquestador y
