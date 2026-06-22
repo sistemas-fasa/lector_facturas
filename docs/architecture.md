@@ -58,9 +58,9 @@ activarse en produccion cuando n8n ya lee la casilla.
 INVOICE_AI_ENABLED=true
 INVOICE_AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=openrouter/free
+OPENROUTER_MODEL=google/gemini-2.5-flash
 OPENROUTER_FALLBACK_MODEL=
-INVOICE_AI_ALLOW_FREE_MODELS=true
+INVOICE_AI_ALLOW_FREE_MODELS=false
 INVOICE_AI_TIMEOUT_SECONDS=60
 INVOICE_AI_MAX_RETRIES=1
 INVOICE_AI_DEBUG=true
@@ -72,14 +72,21 @@ INVOICE_AI_TOTAL_TOLERANCE=2.00
 INVOICE_AI_FALLBACK_LEGACY=true
 ```
 
+`google/gemini-2.5-flash` es el modelo recomendado para validar facturas reales.
+`google/gemini-2.5-flash-lite` queda como opcion economica para pruebas
+controladas. `openrouter/free` solo sirve como smoke de conectividad, API key y
+consumo contra OpenRouter; no se recomienda para facturas reales porque el router
+puede seleccionar modelos que omiten campos fiscales criticos como
+`punto_venta`, `codigo_afip`, letra o confianza.
+
 ### Produccion
 
 ```env
 INVOICE_AI_ENABLED=true
 INVOICE_AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=google/gemini-2.5-flash-lite
-OPENROUTER_FALLBACK_MODEL=google/gemini-2.5-flash
+OPENROUTER_MODEL=google/gemini-2.5-flash
+OPENROUTER_FALLBACK_MODEL=google/gemini-2.5-flash-lite
 INVOICE_AI_ALLOW_FREE_MODELS=false
 INVOICE_AI_TIMEOUT_SECONDS=45
 INVOICE_AI_MAX_RETRIES=2
@@ -95,6 +102,11 @@ INVOICE_AI_FALLBACK_LEGACY=true
 Si `OPENROUTER_MODEL` es `openrouter/free` o contiene `:free` y
 `INVOICE_AI_ALLOW_FREE_MODELS` no es `true`, la IA no se usa. El error queda registrado como
 `free_model_not_allowed` y el flujo cae al fallback legacy.
+
+Criterio de cierre del PR IA-first: el test live debe confirmar que Gemini
+Flash levanta `punto_venta`, `codigo_afip`, numero, fecha, CUIT y total en una
+factura real. Si no cumple esos campos, antes de seguir tocando prompts hay que
+pasar a renderizado de PDF como imagen.
 
 ---
 
@@ -166,7 +178,7 @@ Campos criticos:
 {
   "ai": {
     "provider": "openrouter",
-    "model": "google/gemini-2.5-flash-lite",
+    "model": "google/gemini-2.5-flash",
     "fallback_model_used": false,
     "enabled": true,
     "confidence": 0.92,

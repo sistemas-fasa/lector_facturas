@@ -156,7 +156,7 @@ def test_openrouter_client_sends_api_key_in_authorization_header(monkeypatch):
         document_bytes=b"factura",
         filename="factura.png",
         mime_type="image/png",
-        model="openrouter/free",
+        model="paid-model",
         timeout_seconds=17,
     )
 
@@ -167,7 +167,7 @@ def test_openrouter_client_sends_api_key_in_authorization_header(monkeypatch):
 def test_valid_openrouter_json_builds_ai_invoice(monkeypatch):
     monkeypatch.setenv("INVOICE_AI_ENABLED", "true")
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.setenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+    monkeypatch.setenv("OPENROUTER_MODEL", "paid-model")
     client = FakeClient([json.dumps(VALID_AI_JSON)])
 
     result = extract_invoice_ai_first(
@@ -184,13 +184,13 @@ def test_valid_openrouter_json_builds_ai_invoice(monkeypatch):
     assert result.invoice["comprobante"]["punto_venta"] == "0007"
     assert result.invoice["importes"]["iva_21"] == 2331975.45
     assert result.trace["fallback_usado"] is False
-    assert result.trace["ai"]["model"] == "google/gemini-2.5-flash-lite"
+    assert result.trace["ai"]["model"] == "paid-model"
 
 
 def test_openrouter_zero_point_of_sale_stays_review_required(monkeypatch):
     monkeypatch.setenv("INVOICE_AI_ENABLED", "true")
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.setenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+    monkeypatch.setenv("OPENROUTER_MODEL", "paid-model")
     payload = json.loads(json.dumps(VALID_AI_JSON))
     payload["comprobante"]["punto_venta"] = "0000"
     client = FakeClient([json.dumps(payload)])
@@ -212,7 +212,7 @@ def test_openrouter_zero_point_of_sale_stays_review_required(monkeypatch):
 def test_invalid_openrouter_json_falls_back_to_legacy(monkeypatch):
     monkeypatch.setenv("INVOICE_AI_ENABLED", "true")
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.setenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+    monkeypatch.setenv("OPENROUTER_MODEL", "paid-model")
     client = FakeClient(["not-json"])
 
     result = extract_invoice_ai_first(
@@ -232,7 +232,7 @@ def test_invalid_openrouter_json_falls_back_to_legacy(monkeypatch):
 def test_openrouter_timeout_falls_back_to_legacy(monkeypatch):
     monkeypatch.setenv("INVOICE_AI_ENABLED", "true")
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.setenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+    monkeypatch.setenv("OPENROUTER_MODEL", "paid-model")
     client = FakeClient([TimeoutError("slow")])
 
     result = extract_invoice_ai_first(
@@ -252,7 +252,7 @@ def test_openrouter_timeout_falls_back_to_legacy(monkeypatch):
 def test_openrouter_http_error_keeps_status_in_trace(monkeypatch):
     monkeypatch.setenv("INVOICE_AI_ENABLED", "true")
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.setenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+    monkeypatch.setenv("OPENROUTER_MODEL", "paid-model")
     error = HTTPError(
         url="https://openrouter.ai/api/v1/chat/completions",
         code=401,
@@ -278,8 +278,8 @@ def test_openrouter_http_error_keeps_status_in_trace(monkeypatch):
 def test_fallback_model_is_used_when_primary_fails(monkeypatch):
     monkeypatch.setenv("INVOICE_AI_ENABLED", "true")
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.setenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
-    monkeypatch.setenv("OPENROUTER_FALLBACK_MODEL", "google/gemini-2.5-flash")
+    monkeypatch.setenv("OPENROUTER_MODEL", "paid-model")
+    monkeypatch.setenv("OPENROUTER_FALLBACK_MODEL", "fallback-paid-model")
     client = FakeClient([URLError("model failed"), json.dumps(VALID_AI_JSON)])
 
     result = extract_invoice_ai_first(
@@ -291,9 +291,9 @@ def test_fallback_model_is_used_when_primary_fails(monkeypatch):
         client=client,
     )
 
-    assert [call["model"] for call in client.calls] == ["google/gemini-2.5-flash-lite", "google/gemini-2.5-flash"]
+    assert [call["model"] for call in client.calls] == ["paid-model", "fallback-paid-model"]
     assert result.invoice["estado"] == "OK"
-    assert result.trace["ai"]["model"] == "google/gemini-2.5-flash"
+    assert result.trace["ai"]["model"] == "fallback-paid-model"
     assert result.trace["ai"]["fallback_model_used"] is True
 
 
