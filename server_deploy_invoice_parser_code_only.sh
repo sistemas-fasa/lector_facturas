@@ -32,7 +32,8 @@ rm -rf "$PARSER_DIR/factura_ocr"
 cp -R /tmp/factura_ocr "$PARSER_DIR/"
 
 echo "== validar compose =="
-docker compose config >/tmp/n8n-compose-check.yml
+compose_check_file="$(mktemp "${TMPDIR:-/tmp}/n8n-compose-check.XXXXXX.yml")"
+docker compose config >"$compose_check_file"
 
 echo "== reconstruir invoice-parser =="
 docker compose up -d --build invoice-parser

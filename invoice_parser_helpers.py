@@ -201,6 +201,42 @@ def extract_invoice_number(text: str) -> dict[str, str | None]:
     }
 
 
+def _extract_afip_comprobante_code(text: str) -> str:
+    head = (text or "")[:1600]
+    patterns = [
+        r"\bCod\.?\s*(?:igo)?\s*[:#-]?\s*(\d{1,3})\b",
+        r"\bC[oó]digo\s+Tipo\s+Comprobante\s*[:#-]?\s*(\d{1,3})\b",
+        r"\bC[oó]digo\s*[:#-]?\s*(\d{1,3})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, head, re.I)
+        if match:
+            return match.group(1).zfill(3)
+    cod_pos = re.search(r"\bCod\.?\b|\bC[oó]digo\b", head, re.I)
+    if cod_pos and re.search(r"\b(?:FACTURA|NOTA\s+DE\s+CR[EÉ]DITO|NOTA\s+DE\s+D[EÉ]BITO)\b", head[: cod_pos.start() + 100], re.I):
+        window = head[cod_pos.end() : cod_pos.end() + 260]
+        for code_match in re.finditer(r"\b(00[1-9]|01[0-5]|05[1-4]|20[1-3]|20[6-8]|21[1-3])\b", window):
+            return code_match.group(1)
+    return ""
+
+
+def _invoice_afip_code_from_type(invoice_type: str, letter: str | None) -> str:
+    normalized_type = re.sub(r"[^A-Z]", "_", (invoice_type or "").upper()).strip("_")
+    normalized_letter = (letter or "").upper()
+    codes = {
+        ("FACTURA", "A"): "001",
+        ("FACTURA", "B"): "006",
+        ("FACTURA", "C"): "011",
+        ("NOTA_DEBITO", "A"): "002",
+        ("NOTA_DEBITO", "B"): "007",
+        ("NOTA_DEBITO", "C"): "012",
+        ("NOTA_CREDITO", "A"): "003",
+        ("NOTA_CREDITO", "B"): "008",
+        ("NOTA_CREDITO", "C"): "013",
+    }
+    return codes.get((normalized_type, normalized_letter), "")
+
+
 def _best_invoice_number_match(body: str) -> re.Match[str] | None:
     explicit = INVOICE_NUMBER_ALT_RE.search(body or "")
     if explicit:
@@ -889,6 +925,13 @@ def build_invoice_json(
             cae = qr_cae
     if not invoice_number["letra"]:
         invoice_number["letra"] = _invoice_letter_from_ocr_afip_code(ocr_text)
+    comprobante_tipo = _extract_comprobante_type(ocr_text)
+    comprobante_codigo = (
+        _format_afip_code(qr_data.get("tipoCmp")) if qr_data else ""
+    ) or _extract_afip_comprobante_code(ocr_text) or _invoice_afip_code_from_type(
+        comprobante_tipo,
+        invoice_number["letra"],
+    )
     currency = _currency_from_qr(qr_data.get("moneda") if qr_data else None) or _extract_currency(ocr_text)
     neto_gravado = _extract_neto_gravado(ocr_text, total, iva_21, iva_105, iva_27, advanced_invoice)
     reference_amounts = [total, neto_gravado, iva_21, iva_105, iva_27]
@@ -917,7 +960,8 @@ def build_invoice_json(
             "email": (source_metadata or {}).get("email") or {},
         },
         "comprobante": {
-            "tipo": _extract_comprobante_type(ocr_text),
+            "tipo": comprobante_tipo,
+            "codigo": comprobante_codigo,
             "letra": invoice_number["letra"],
             "punto_venta": invoice_number["punto_venta"],
             "numero": invoice_number["numero"],
@@ -1010,9 +1054,8 @@ def build_invoice_json(
 
     invoice["contabilidad"] = infer_accounting(invoice, advanced_invoice)
     provider_label = str((invoice.get("contabilidad") or {}).get("proveedor_nombre") or "").strip()
-    if provider_label and not (invoice.get("contabilidad") or {}).get("observaciones"):
-        if _looks_like_bad_business_name(str(invoice["emisor"].get("razon_social") or "")):
-            invoice["emisor"]["razon_social"] = provider_label[:120]
+    if provider_label and _looks_like_bad_business_name(str(invoice["emisor"].get("razon_social") or "")):
+        invoice["emisor"]["razon_social"] = provider_label[:120]
     invoice["diagnostico"] = build_diagnostico(invoice)
     if profile_info:
         invoice.setdefault("extraccion_enriquecida", {})["perfil_proveedor_aplicado"] = profile_info
@@ -1931,6 +1974,11 @@ def _invoice_number_from_qr(data: dict[str, Any]) -> dict[str, str | None] | Non
     }
 
 
+def _format_afip_code(value: Any) -> str:
+    digits = _digits_from_value(value)
+    return digits.zfill(3) if digits else ""
+
+
 def _invoice_letter_from_afip_type(value: Any) -> str | None:
     digits = _digits_from_value(value)
     if not digits:
@@ -1948,23 +1996,8 @@ def _invoice_letter_from_afip_type(value: Any) -> str | None:
 
 
 def _invoice_letter_from_ocr_afip_code(text: str) -> str | None:
-    head = (text or "")[:1200]
-    patterns = [
-        r"\bCod\.?\s*(?:igo)?\s*[:#-]?\s*(\d{1,3})\b",
-        r"\bC[oó]digo\s+Tipo\s+Comprobante\s*[:#-]?\s*(\d{1,3})\b",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, head, re.I)
-        if match:
-            return _invoice_letter_from_afip_type(match.group(1).zfill(3))
-    cod_pos = re.search(r"\bCod\.?\b|\bC[oó]digo\b", head, re.I)
-    if cod_pos and re.search(r"\bFACTURA\b", head[: cod_pos.start() + 80], re.I):
-        window = head[cod_pos.end() : cod_pos.end() + 260]
-        for code_match in re.finditer(r"\b(00[1-9]|01[0-5]|05[1-4]|20[1-3]|20[6-8]|21[1-3])\b", window):
-            letter = _invoice_letter_from_afip_type(code_match.group(1))
-            if letter:
-                return letter
-    return None
+    code = _extract_afip_comprobante_code(text)
+    return _invoice_letter_from_afip_type(code) if code else None
 
 
 def _cuit_from_qr(value: Any) -> str:
@@ -2148,6 +2181,7 @@ def _upsert_invoice_staging_header(conn: Any, invoice: dict[str, Any], written_f
         "receptor_cuit": receiver.get("cuit") or "",
         "receptor_iva_condicion": receiver.get("iva_condicion") or "",
         "comprobante_tipo": comp.get("tipo") or "FACTURA",
+        "comprobante_codigo": comp.get("codigo") or _invoice_afip_code_from_type(comp.get("tipo") or "FACTURA", comp.get("letra")),
         "letra": comp.get("letra") or None,
         "punto_venta": comp.get("punto_venta") or "",
         "numero": comp.get("numero") or "",
@@ -2219,7 +2253,7 @@ def _replace_invoice_staging_detail(conn: Any, factura_id: int, invoice: dict[st
             return 0
         cur.execute("DELETE FROM facturas_ocr_detalle WHERE factura_id = %s", (factura_id,))
         count = 0
-        for line_no, item in enumerate(invoice.get("items") or [], start=1):
+        for line_no, item in enumerate(_staging_detail_items(invoice), start=1):
             cur.execute(
                 """
                 INSERT INTO facturas_ocr_detalle (
@@ -2258,7 +2292,7 @@ def _replace_invoice_staging_detail(conn: Any, factura_id: int, invoice: dict[st
                 (
                     factura_id,
                     sha,
-                    _accounting_reference_description(invoice, invoice.get("extraccion_facturas_ocr") or {}),
+                    _staging_fallback_description(invoice),
                     normalize_amount((invoice.get("importes") or {}).get("neto_gravado"))
                     or normalize_amount((invoice.get("importes") or {}).get("total")),
                     accounting.get("cuenta_contable") or "",
@@ -2270,6 +2304,38 @@ def _replace_invoice_staging_detail(conn: Any, factura_id: int, invoice: dict[st
             )
             count = 1
         return count
+
+
+def _staging_detail_items(invoice: dict[str, Any]) -> list[dict[str, Any]]:
+    usable: list[dict[str, Any]] = []
+    for item in invoice.get("items") or []:
+        quantity = _amount_or_none(item.get("cantidad"))
+        unit_price = _amount_or_none(item.get("precio_unitario"))
+        subtotal = _amount_or_none(item.get("subtotal"))
+        if (subtotal is None or subtotal <= 0) and quantity and unit_price:
+            subtotal = round(float(quantity) * float(unit_price), 2)
+        if subtotal is None or subtotal <= 0:
+            continue
+        usable.append(
+            {
+                "descripcion": item.get("descripcion") or "",
+                "cantidad": quantity,
+                "precio_unitario": unit_price,
+                "subtotal": subtotal,
+            }
+        )
+    return usable
+
+
+def _staging_fallback_description(invoice: dict[str, Any]) -> str:
+    issuer = str((invoice.get("emisor") or {}).get("razon_social") or "").strip()
+    if issuer:
+        return issuer[:255]
+    accounting = invoice.get("contabilidad") or {}
+    account_desc = str(accounting.get("cuenta_descripcion") or "").strip()
+    if account_desc:
+        return account_desc[:255]
+    return _accounting_reference_description(invoice, invoice.get("extraccion_facturas_ocr") or {})
 
 
 def _replace_invoice_staging_iibb_perceptions(conn: Any, factura_id: int, invoice: dict[str, Any]) -> int:
@@ -2521,7 +2587,7 @@ def _looks_like_bad_business_name(value: str) -> bool:
         return True
     return bool(
         re.search(
-            r"art[ií]culo|descripci[oó]n|cantidad|importe|unitario|domicilio|factura\s+anticipada|^tecno\.?\s+[abcm]$|^s?rupo$",
+            r"art[ií]culo|descripci[oó]n|cantidad|importe|unitario|domicilio|localidad|transporte|fecha\s+de\s+emisi[oó]n|^c[oó]digo\b|^n[uú]mero\b|factura\s+anticipada|^tecno\.?\s+[abcm]$|^s?rupo$",
             clean,
             re.I,
         )
