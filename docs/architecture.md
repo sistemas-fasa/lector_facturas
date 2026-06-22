@@ -1,18 +1,29 @@
-# Arquitectura Híbrida: Extracción Determinística + Fallback IA
+# Arquitectura AI-first: OpenRouter + Validacion Local + Fallback Legacy
 
 ## Principio rector
 
-El parser **nunca debe depender de IA generativa** para el flujo principal.
-La IA es un recurso opcional, auditable, desactivado por defecto y reservado
-exclusivamente para casos donde el pipeline determinístico no alcanza
-confianza suficiente.
+El flujo principal de extraccion de facturas es **AI-first via OpenRouter**.
+PyOCR, Tesseract, lectura de texto PDF, QR y regex quedan como fallback legacy.
+No se deben seguir optimizando como solucion principal.
+
+```text
+n8n -> /enqueue?source_type=email
+  -> Adjunto original PDF/JPG/PNG
+  -> OpenRouter AI extractor multimodal
+  -> Validacion local dura
+  -> Si OK: JSON normalizado + staging MySQL
+  -> Si falla: fallback legacy actual
+  -> Si legacy no alcanza: REVIEW_REQUIRED
+```
+
+La IA no decide el estado final. El backend valida y decide.
 
 ---
 
 ## Ingesta productiva de correo
 
-El flujo productivo de correo usa n8n como lector y orquestador principal.
-n8n lee la casilla, descarga adjuntos y llama al sidecar HTTP:
+El contrato de entrada no cambia. n8n sigue leyendo la casilla y enviando el
+archivo al sidecar:
 
 ```text
 POST http://invoice-parser:8765/enqueue?source_type=email
@@ -20,176 +31,155 @@ Content-Type: multipart/form-data
 Campo obligatorio: file
 ```
 
-Ese endpoint es parte del contrato productivo entre n8n e
-`invoice-parser`. El polling IMAP interno del servicio Python puede existir
-como modo opcional/secundario, pero no debe asumirse como el flujo principal
-cuando n8n esta activo. Ver `docs/n8n-email-ingestion.md` para el contrato
-completo.
+El polling IMAP interno del servicio Python sigue siendo secundario y no debe
+activarse en produccion cuando n8n ya lee la casilla.
 
 ---
 
-## Flujo principal (determinístico, siempre activo)
+## Pipeline principal
 
-```
-n8n -> /enqueue?source_type=email
-  -> Adjunto (PDF / JPG / PNG)
-  -> Decodificacion QR AFIP (zbarimg / pyzbar)
-  -> Extraccion de texto PDF (pymupdf)
-  -> OCR con Tesseract (fallback si texto PDF insuficiente)
-  -> Reglas de extraccion locales (factura_ocr/extract.py)
-  -> Heuristicas de validacion cruzada (invoice_parser_helpers.py)
-    - QR vs. texto OCR
-    - Balance de importes (neto + IVA + percepciones = total)
-    - Digito verificador de CUIT
-  -> Persistencia en MySQL staging (facturas_ocr_cabecera, detalle, eventos)
-  -> Consumo desde Visual FoxPro (vistas staging)
-```
-
-### Componentes del pipeline determinístico
-
-| Componente | Archivo | Responsabilidad |
+| Etapa | Archivo | Responsabilidad |
 |---|---|---|
-| Sidecar HTTP | `host_invoice_parser_service.py` | Recibe archivos desde n8n, encola y procesa |
-| Decodificador QR | `host_invoice_parser_service.py:633` | Lee código AFIP desde imagen/PDF |
-| Extracción de texto | `factura_ocr/extract.py:318` | PDF text + OCR Tesseract |
-| Reglas de extracción | `factura_ocr/extract.py:1171` | Parseo de campos: CUIT, fecha, total, IVA, etc. |
-| Validación enriquecida | `invoice_parser_helpers.py:590` | Cruzar QR vs OCR, balance, confianza por campo |
-| Staging MySQL | `invoice_parser_helpers.py:1069` | Persistencia para FoxPro |
-
-### Salida del pipeline
-
-El resultado es un JSON con trazabilidad por campo:
-
-```json
-{
-  "version": "2.0",
-  "status": "OK",
-  "fuentes": { "qr_detectado": true, ... },
-  "campos": {
-    "proveedor_cuit": {
-      "valor": "30-12345678-9",
-      "confianza": 98,
-      "fuente": "qr",
-      "metodo": "qr_cuit",
-      "evidencia": "{...}"
-    },
-    "total": {
-      "valor": "1234.56",
-      "confianza": 85,
-      "fuente": "pdf_text",
-      "metodo": "regex_total",
-      "evidencia": "TOTAL $ 1234.56"
-    }
-  },
-  "validaciones": {
-    "ok": true,
-    "fallas": [],
-    "balance_importes": { "ok": true }
-  }
-}
-```
-
-Cuando hay campos críticos sin evidencia o validaciones fallidas, el `status`
-cambia a `REVIEW_REQUIRED`.
+| Orquestacion HTTP | `host_invoice_parser_service.py` | Recibe archivo y llama primero a `invoice_ai_extractor` |
+| Configuracion IA | `invoice_ai_extractor/schema.py` | Lee env vars, valida proveedor/modelo/free models |
+| Cliente OpenRouter | `invoice_ai_extractor/openrouter_client.py` | Envia el archivo original como entrada multimodal |
+| Prompt | `invoice_ai_extractor/prompts.py` | Instrucciones para JSON fiscal argentino |
+| Validacion local | `invoice_ai_extractor/validators.py` | Normaliza y valida campos criticos, importes y confianza |
+| Fallback legacy | `host_invoice_parser_service.py` + `invoice_parser_helpers.py` | QR/PDF text/OCR/reglas solo si IA no sirve |
+| Staging MySQL | `invoice_parser_helpers.py` | Persistencia para FoxPro |
 
 ---
 
-## Fallback IA (desactivado por defecto)
+## Variables de entorno
 
-### Contrato
-
-- **Nunca reemplaza** datos provenientes del QR AFIP (fuente `"qr"`).
-- **Nunca escribe** datos finales en staging sin evidencia registrada.
-- Solo se invoca cuando el `status` del pipeline determinístico es
-  `REVIEW_REQUIRED` **o** la confianza de un campo crítico está por debajo
-  de `INVOICE_AI_MIN_CONFIDENCE`.
-- La respuesta de la IA se almacena como un campo más con `fuente: "ai"`,
-  método `"ai_generative"` y evidencia del prompt+respuesta.
-- La decisión final (aceptar/rechazar sugerencia IA) queda siempre en
-  el validador determinístico.
-
-### Variables de entorno (futuras)
+### Desarrollo / staging
 
 ```env
-# Habilitar fallback IA (false por defecto)
-INVOICE_AI_FALLBACK_ENABLED=false
-
-# Invocar IA solo cuando status == REVIEW_REQUIRED
-INVOICE_AI_ONLY_WHEN_REVIEW_REQUIRED=true
-
-# Confianza mínima para considerar un campo como "confiable"
-# Por debajo de este umbral se invoca IA si está habilitada
-INVOICE_AI_MIN_CONFIDENCE=0.85
-
-# Proveedor del modelo (openai, anthropic, etc.)
-INVOICE_AI_PROVIDER=openai
-
-# Modelo específico (vacío = usar default del proveedor)
-INVOICE_AI_MODEL=
+INVOICE_AI_ENABLED=true
+INVOICE_AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=openrouter/free
+OPENROUTER_FALLBACK_MODEL=
+INVOICE_AI_ALLOW_FREE_MODELS=true
+INVOICE_AI_TIMEOUT_SECONDS=60
+INVOICE_AI_MAX_RETRIES=1
+INVOICE_AI_DEBUG=true
+INVOICE_AI_STORE_RAW_RESPONSE=true
+INVOICE_AI_LOG_RAW_RESPONSE=false
+INVOICE_AI_MIN_CONFIDENCE=0.70
+INVOICE_AI_REQUIRE_CRITICAL_FIELDS=true
+INVOICE_AI_TOTAL_TOLERANCE=2.00
+INVOICE_AI_FALLBACK_LEGACY=true
 ```
 
-### Lugar de inserción en el pipeline
+### Produccion
 
-El fallback IA se插aría en `invoice_parser_helpers.py:_build_enriched_extraction`,
-**después** del bloque de reglas determinísticas y **antes** de la validación
-final, solo si `INVOICE_AI_FALLBACK_ENABLED=true` y se cumplen las condiciones
-de guarda.
-
+```env
+INVOICE_AI_ENABLED=true
+INVOICE_AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_FALLBACK_MODEL=google/gemini-2.5-flash
+INVOICE_AI_ALLOW_FREE_MODELS=false
+INVOICE_AI_TIMEOUT_SECONDS=45
+INVOICE_AI_MAX_RETRIES=2
+INVOICE_AI_DEBUG=false
+INVOICE_AI_STORE_RAW_RESPONSE=true
+INVOICE_AI_LOG_RAW_RESPONSE=false
+INVOICE_AI_MIN_CONFIDENCE=0.75
+INVOICE_AI_REQUIRE_CRITICAL_FIELDS=true
+INVOICE_AI_TOTAL_TOLERANCE=2.00
+INVOICE_AI_FALLBACK_LEGACY=true
 ```
-Reglas determinísticas
-  → [IA fallback si corresponde]  ← solo aquí
-  → Validación y balance
-  → Staging MySQL
-```
 
-### Ejemplo de campo generado por IA
+Si `OPENROUTER_MODEL` es `openrouter/free` o contiene `:free` y
+`INVOICE_AI_ALLOW_FREE_MODELS` no es `true`, la IA no se usa. El error queda registrado como
+`free_model_not_allowed` y el flujo cae al fallback legacy.
+
+---
+
+## Schema esperado desde IA
+
+La IA debe devolver solo JSON valido:
 
 ```json
 {
-  "proveedor_nombre": {
-    "valor": "PROVEEDOR S.A.",
-    "confianza": 65,
-    "fuente": "ai",
-    "metodo": "ai_generative",
-    "evidencia": "prompt: extraer razon social de texto OCR\nrespuesta: PROVEEDOR S.A."
-  }
+  "proveedor": {"razon_social": null, "cuit": null},
+  "comprobante": {
+    "tipo": null,
+    "letra": null,
+    "codigo_afip": null,
+    "punto_venta": null,
+    "numero": null,
+    "fecha_emision": null
+  },
+  "cae": {"numero": null, "vencimiento": null},
+  "importes": {
+    "neto_gravado": null,
+    "iva_21": null,
+    "iva_105": null,
+    "iva_27": null,
+    "exento": null,
+    "no_gravado": null,
+    "percepciones": null,
+    "percepciones_iibb": null,
+    "otros_impuestos": null,
+    "total": null
+  },
+  "moneda": null,
+  "confianza": {"general": 0, "campos_dudosos": []},
+  "observaciones": []
 }
 ```
 
 ---
 
-## Reglas de seguridad
+## Validaciones locales obligatorias
 
-1. **El QR AFIP siempre tiene prioridad.** Si un campo fue extraído del QR
-   (`fuente: "qr"`), ni las reglas determinísticas ni la IA lo sobrescriben.
-2. **La IA no persiste por sí misma.** Todo dato sugerido por IA pasa por
-   el validador (`_validate_enriched_fields`) antes de llegar a staging.
-3. **Auditabilidad.** Cada campo registra `fuente`, `metodo` y `evidencia`.
-   Un campo IA siempre contiene el prompt enviado y la respuesta cruda.
-4. **Sin secretos en código.** Las claves de API para IA van en `.env` vía
-   variables de entorno, no versionadas.
-5. **Sin modificación de lógica productiva.** Este documento describe una
-   arquitectura futura; el código actual no contiene ninguna invocación a
-   un modelo de IA generativa.
-6. **Contrato n8n estable.** La IA futura no debe cambiar el endpoint
-   `POST /enqueue?source_type=email`, el campo multipart `file` ni la
-   responsabilidad de n8n como lector principal de correo.
+- `punto_venta` no puede ser `0000` y debe ser mayor a cero.
+- `numero` no puede ser `00000000`.
+- `total` debe ser mayor a cero.
+- CUIT se normaliza a digitos y, si existe, debe tener 11 digitos.
+- Fecha de emision debe ser valida.
+- Si hay CAE, debe tener longitud razonable.
+- Si existen componentes de importes y total, la suma debe aproximar al total.
+- Si `confianza.general` es menor al minimo configurado, queda
+  `REVIEW_REQUIRED`.
+- Si faltan o son dudosos campos criticos, queda `REVIEW_REQUIRED`.
+
+Campos criticos:
+
+- proveedor CUIT o razon social;
+- tipo/letra/codigo de comprobante;
+- punto de venta;
+- numero;
+- fecha;
+- total.
 
 ---
 
-## Variables de entorno existentes (no IA)
+## Trazabilidad
 
-Estas variables ya forman parte del sistema y no se ven afectadas por la
-arquitectura híbrida:
+`extraccion_enriquecida` conserva la traza AI y el fallback:
 
-| Variable | Uso |
-|---|---|
-| `INVOICE_TOTAL_TOLERANCE` | Tolerancia en balance de importes |
-| `INVOICE_QR_MAX_PAGES` | Páginas a escanear en búsqueda de QR |
-| `INVOICE_QR_ZBAR_TIMEOUT_SECONDS` | Timeout para zbarimg |
-| `FASA_MYSQL_*` | Conexión a staging MySQL |
-| `INVOICE_EMAIL_*` | Configuración de casilla IMAP |
+```json
+{
+  "ai": {
+    "provider": "openrouter",
+    "model": "google/gemini-2.5-flash-lite",
+    "fallback_model_used": false,
+    "enabled": true,
+    "confidence": 0.92,
+    "campos_dudosos": [],
+    "observaciones": [],
+    "raw_response": {},
+    "error": null,
+    "validaciones": {"ok": true, "fallas": []}
+  },
+  "fallback_usado": false,
+  "fallback_tipo": null,
+  "validaciones": {"ok": true, "fallas": []}
+}
+```
 
-Ver `docs/EMAIL_FACTURAS_OCR.md` para el workflow de email y
-`docs/n8n-email-ingestion.md` para el contrato productivo n8n ->
-`invoice-parser`.
+No se guardan claves API en logs ni en JSON generado.

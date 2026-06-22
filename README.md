@@ -1,13 +1,17 @@
 # Lector de Facturas
 
-Parser local de facturas para n8n, MySQL staging y consumo desde Visual FoxPro.
+Parser de facturas para n8n, MySQL staging y consumo desde Visual FoxPro.
 
-El flujo evita IA generativa: usa lectura de texto PDF, OCR local con Tesseract,
-QR AFIP, reglas Python y persistencia MySQL.
+El flujo principal nuevo es **AI-first via OpenRouter**: el sidecar intenta
+extraer la factura desde el archivo original con IA multimodal, valida la
+respuesta localmente con reglas duras y solo despues cae al pipeline legacy
+de PDF text / QR / OCR / PyOCR / regex.
 
 ## Componentes principales
 
 - `host_invoice_parser_service.py`: sidecar HTTP para recibir archivos desde n8n.
+- `invoice_ai_extractor/`: extraccion AI-first via OpenRouter, validacion local
+  y orquestacion de fallback legacy.
 - `invoice_parser_helpers.py`: armado de JSON legacy, JSON enriquecido, XML y staging.
 - `factura_ocr/`: reglas locales de extracción sobre texto PDF/OCR.
 - `facturas_ocr_staging.sql`: tablas y vistas MySQL para FoxPro.
@@ -20,14 +24,61 @@ python -m pytest -q
 python -m compileall invoice_parser_helpers.py host_invoice_parser_service.py invoice_parser_runtime.py factura_ocr
 ```
 
-## Arquitectura híbrida
+## Arquitectura AI-first
 
 Ver `docs/architecture.md` para el detalle de la arquitectura:
 
-- **Pipeline determinístico** (siempre activo): QR AFIP → PDF text → OCR Tesseract
-  → reglas locales → validación cruzada → staging MySQL.
-- **Fallback IA** (desactivado por defecto): opcional, solo para casos
-  `REVIEW_REQUIRED`, nunca reemplaza datos del QR AFIP.
+- **Pipeline principal**: archivo original → OpenRouter AI extractor →
+  validacion local dura → staging MySQL.
+- **Fallback legacy**: QR AFIP → PDF text → OCR Tesseract → reglas locales →
+  validacion cruzada, usado solo si IA esta deshabilitada, falla, devuelve JSON
+  invalido o no supera validaciones.
+
+## Configuracion IA
+
+Desarrollo/staging puede usar modelos free explicitamente:
+
+```env
+INVOICE_AI_ENABLED=true
+INVOICE_AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=openrouter/free
+OPENROUTER_FALLBACK_MODEL=
+INVOICE_AI_ALLOW_FREE_MODELS=true
+INVOICE_AI_TIMEOUT_SECONDS=60
+INVOICE_AI_MAX_RETRIES=1
+INVOICE_AI_DEBUG=true
+INVOICE_AI_STORE_RAW_RESPONSE=true
+INVOICE_AI_LOG_RAW_RESPONSE=false
+INVOICE_AI_MIN_CONFIDENCE=0.70
+INVOICE_AI_REQUIRE_CRITICAL_FIELDS=true
+INVOICE_AI_TOTAL_TOLERANCE=2.00
+INVOICE_AI_FALLBACK_LEGACY=true
+```
+
+Produccion debe usar modelos sin `:free` salvo decision explicita:
+
+```env
+INVOICE_AI_ENABLED=true
+INVOICE_AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_FALLBACK_MODEL=google/gemini-2.5-flash
+INVOICE_AI_ALLOW_FREE_MODELS=false
+INVOICE_AI_TIMEOUT_SECONDS=45
+INVOICE_AI_MAX_RETRIES=2
+INVOICE_AI_DEBUG=false
+INVOICE_AI_STORE_RAW_RESPONSE=true
+INVOICE_AI_LOG_RAW_RESPONSE=false
+INVOICE_AI_MIN_CONFIDENCE=0.75
+INVOICE_AI_REQUIRE_CRITICAL_FIELDS=true
+INVOICE_AI_TOTAL_TOLERANCE=2.00
+INVOICE_AI_FALLBACK_LEGACY=true
+```
+
+Si `OPENROUTER_MODEL` es `openrouter/free` o contiene `:free` y
+`INVOICE_AI_ALLOW_FREE_MODELS` no es `true`, la IA no se usa y el sistema cae
+al fallback legacy con error controlado en trazabilidad.
 
 ## Ingesta de correo con n8n
 
