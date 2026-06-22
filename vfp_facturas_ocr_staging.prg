@@ -20,7 +20,7 @@ FUNCTION OcrPendientes(lnConn, tcCursor)
     lcCursor = IIF(EMPTY(tcCursor), "curOcrPendientes", tcCursor)
     lcSql = ;
         "SELECT id, fecha_proceso, proveedor_codigo, proveedor_nombre, " + ;
-        "emisor_razon_social, emisor_cuit, comprobante, fecha_emision, total, " + ;
+        "emisor_razon_social, emisor_cuit, comprobante_codigo, comprobante, fecha_emision, total, " + ;
         "percepciones_iibb, " + ;
         "cuenta_contable_sugerida, cuenta_descripcion_sugerida, score_sugerencia, " + ;
         "requiere_revision, observaciones " + ;
@@ -40,7 +40,7 @@ FUNCTION OcrDetalle(lnConn, tnFacturaId, tcCursor)
     LOCAL lcCursor, lcSql, lnOk
     lcCursor = IIF(EMPTY(tcCursor), "curOcrDetalle", tcCursor)
     lcSql = ;
-        "SELECT id, factura_id, linea, descripcion_factura, cantidad, precio_unitario, subtotal, " + ;
+        "SELECT id, factura_id, linea, CAST(descripcion_factura AS CHAR(250)) AS descripcion_factura, cantidad, precio_unitario, subtotal, " + ;
         "cuenta_contable, cuenta_descripcion, origen_sugerencia, score_sugerencia, " + ;
         "requiere_confirmacion, confirmada " + ;
         "FROM vw_facturas_ocr_detalle " + ;

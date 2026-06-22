@@ -10,10 +10,13 @@ from invoice_parser_helpers import (
     INVOICE_PROVIDER_PROFILES_ENV_VAR,
     _advanced_line_items,
     _apply_provider_profile,
+    _extract_afip_comprobante_code,
     _extract_amount_after_label,
     _extract_date_after_label,
     _extract_text_after_label,
     _load_provider_profiles,
+    _looks_like_bad_business_name,
+    _replace_invoice_staging_detail,
     _replace_invoice_staging_iibb_perceptions,
     _sane_iibb_amount,
     _select_provider_profile,
@@ -84,6 +87,41 @@ def test_replace_invoice_staging_iibb_perceptions_persists_jurisdiction_detail()
         if "INSERT INTO facturas_ocr_percepciones_iibb" in sql
     ]
     assert inserts == [(7, "abc", 1, "Misiones", "914", 99.93)]
+
+
+def test_replace_invoice_staging_detail_falls_back_when_items_have_no_amounts() -> None:
+    conn = FakeConnection(rows=[{"importada": 0}])
+    invoice = {
+        "origen": {"sha256": "abc"},
+        "emisor": {"razon_social": "NATIONAL PLASTIC GROUP S.R.L."},
+        "importes": {"neto_gravado": 652248.95, "total": 810810.67},
+        "contabilidad": {
+            "cuenta_contable": "501100",
+            "cuenta_descripcion": "COMPRAS",
+            "origen_sugerencia": "historico_stock_co",
+            "score_sugerencia": 90,
+            "requiere_confirmacion": False,
+        },
+        "items": [
+            {"descripcion": "1 CAJA - TEE TRIPLE ENCHUFE", "cantidad": 3402.45, "precio_unitario": None, "subtotal": None},
+            {"descripcion": "250 U CAJA - CODO DOBLE ENCHUFE", "cantidad": 941.67, "precio_unitario": None, "subtotal": None},
+            {"descripcion": "U 3 1 K6", "cantidad": None, "precio_unitario": None, "subtotal": None},
+        ],
+        "extraccion_facturas_ocr": {},
+    }
+
+    rows = _replace_invoice_staging_detail(conn, 27, invoice)
+
+    assert rows == 1
+    inserts = [
+        params
+        for sql, params in conn.cursor_obj.statements
+        if "INSERT INTO facturas_ocr_detalle" in sql
+    ]
+    assert len(inserts) == 1
+    assert inserts[0][0:3] == (27, "abc", "NATIONAL PLASTIC GROUP S.R.L.")
+    assert inserts[0][3] == 652248.95
+    assert inserts[0][4:6] == ("501100", "COMPRAS")
 
 
 def test_embedded_factura_ocr_extracts_dgr_codjur_for_misiones() -> None:
@@ -170,6 +208,61 @@ Total: ARS 1,088,478.15
     )
 
     assert total == 1088478.15
+
+
+def test_build_invoice_json_populates_afip_comprobante_codigo_from_text() -> None:
+    invoice = build_invoice_json(
+        ocr_text=(
+            "NATIONAL PLASTIC GROUP S.R.L.\n"
+            "CUIT: 30-71536394-8\n"
+            "FACTURA A\n"
+            "Codigo: 001\n"
+            "Punto de Venta: 0006 Comp. Nro: 00005780\n"
+            "Fecha de Emision: 19/06/2026\n"
+            "Total: $ 810.810,67\n"
+        ),
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        sha256="ddeeff00" + "4" * 56,
+        ocr_engine="pdf_text",
+    )
+
+    assert invoice["comprobante"]["codigo"] == "001"
+    assert invoice["comprobante"]["letra"] == "A"
+    assert invoice["comprobante"]["punto_venta"] == "0006"
+    assert invoice["comprobante"]["numero"] == "00005780"
+
+
+def test_build_invoice_json_populates_afip_comprobante_codigo_from_qr() -> None:
+    invoice = build_invoice_json(
+        ocr_text=(
+            "NOTA DE CREDITO A\n"
+            "CUIT: 30-50052655-2\n"
+            "Punto de Venta: 0013 Comp. Nro: 00213556\n"
+            "Fecha de Emision: 18/06/2026\n"
+            "Total: $ 200.120,26\n"
+        ),
+        source_type="email",
+        original_filename="nc.pdf",
+        mime_type="application/pdf",
+        sha256="eeff0011" + "5" * 56,
+        ocr_engine="pdf_text",
+        qr_afip={"datos": {"tipoCmp": 3, "ptoVta": 13, "nroCmp": 213556, "importe": 200120.26}},
+    )
+
+    assert invoice["comprobante"]["codigo"] == "003"
+    assert invoice["comprobante"]["letra"] == "A"
+
+
+def test_extract_afip_comprobante_code_finds_near_header_code() -> None:
+    assert _extract_afip_comprobante_code("FACTURA A\nCod. 001\nNro 0006-00005780") == "001"
+
+
+def test_bad_business_name_detects_ocr_labels() -> None:
+    assert _looks_like_bad_business_name("Codigo: 001")
+    assert _looks_like_bad_business_name("Numero: 0005-00007403")
+    assert _looks_like_bad_business_name("Domicilio: FACUNDO QUIROGA 298")
 
 
 def test_advanced_line_items_replaces_placeholder_unit_price_for_single_quantity() -> None:
