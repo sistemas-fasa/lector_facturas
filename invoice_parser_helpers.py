@@ -194,9 +194,10 @@ def extract_invoice_number(text: str) -> dict[str, str | None]:
     letter = None
     if letter_match:
         letter = next(group for group in letter_match.groups() if group)
+    point = _format_point(number_match.group(1)) if number_match else None
     return {
         "letra": letter.upper() if letter else None,
-        "punto_venta": number_match.group(1).zfill(4) if number_match else "",
+        "punto_venta": point or "",
         "numero": number_match.group(2).zfill(8) if number_match else "",
     }
 
@@ -518,6 +519,8 @@ def _decimal_text(value: Any) -> str | None:
 
 def _format_point(value: Any) -> str | None:
     digits = _digits_from_value(value)
+    if not digits or int(digits) <= 0:
+        return None
     return digits.zfill(4) if digits else None
 
 
@@ -1952,7 +1955,10 @@ def _invoice_number_from_advanced(value: str) -> dict[str, str | None] | None:
     match = re.search(r"(\d{4,5})\s*[- ]\s*(\d{6,10})", value or "")
     if not match:
         return None
-    return {"letra": None, "punto_venta": match.group(1).zfill(4), "numero": match.group(2).zfill(8)}
+    point = _format_point(match.group(1))
+    if not point:
+        return None
+    return {"letra": None, "punto_venta": point, "numero": match.group(2).zfill(8)}
 
 
 def _qr_afip_data(qr_afip: dict[str, Any] | None) -> dict[str, Any]:
@@ -1963,13 +1969,13 @@ def _qr_afip_data(qr_afip: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _invoice_number_from_qr(data: dict[str, Any]) -> dict[str, str | None] | None:
-    point = _digits_from_value(data.get("ptoVta"))
+    point = _format_point(data.get("ptoVta"))
     number = _digits_from_value(data.get("nroCmp"))
     if not point or not number:
         return None
     return {
         "letra": _invoice_letter_from_afip_type(data.get("tipoCmp")),
-        "punto_venta": point.zfill(4),
+        "punto_venta": point,
         "numero": number.zfill(8),
     }
 

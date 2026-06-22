@@ -16,3 +16,10 @@ def test_vfp_prg_casts_detail_description_as_char_for_browse():
 
     assert "comprobante_codigo" in prg
     assert "CAST(descripcion_factura AS CHAR(250)) AS descripcion_factura" in prg
+
+
+def test_vfp_pending_query_includes_header_amounts_for_import_form():
+    prg = Path("vfp_facturas_ocr_staging.prg").read_text(encoding="utf-8")
+
+    for field in ("punto_venta", "numero", "neto_gravado", "iva_21", "iva_105", "iva_27", "total"):
+        assert field in prg

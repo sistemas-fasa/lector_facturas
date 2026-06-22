@@ -255,6 +255,56 @@ def test_build_invoice_json_populates_afip_comprobante_codigo_from_qr() -> None:
     assert invoice["comprobante"]["letra"] == "A"
 
 
+def test_build_invoice_json_rejects_zero_point_of_sale_from_qr() -> None:
+    invoice = build_invoice_json(
+        ocr_text=(
+            "DAS DACH S.A.\n"
+            "CUIT: 33-71196985-9\n"
+            "FACTURA A\n"
+            "Fecha de Emision: 19/06/2026\n"
+            "CAE: 86250381245054\n"
+            "Importe Neto Gravado: $ 11.104.645,01\n"
+            "IVA 21%: $ 2.331.975,45\n"
+            "Total: $ 13.436.620,46\n"
+        ),
+        source_type="email",
+        original_filename="das-dach.pdf",
+        mime_type="application/pdf",
+        sha256="ff001122" + "6" * 56,
+        ocr_engine="pdf_text_plus_ocr",
+        qr_afip={"datos": {"tipoCmp": 1, "ptoVta": 0, "nroCmp": 7777, "importe": 13436620.46}},
+    )
+
+    assert invoice["estado"] == "REVIEW_REQUIRED"
+    assert invoice["comprobante"]["punto_venta"] == ""
+    fallas = invoice["extraccion_enriquecida"]["validaciones"]["fallas"]
+    assert any(falla["campo"] == "punto_venta" for falla in fallas)
+
+
+def test_build_invoice_json_rejects_zero_point_of_sale_from_text() -> None:
+    invoice = build_invoice_json(
+        ocr_text=(
+            "DAS DACH S.A.\n"
+            "CUIT: 33-71196985-9\n"
+            "FACTURA A\n"
+            "Nro 0000-00007777\n"
+            "Fecha de Emision: 19/06/2026\n"
+            "Importe Neto Gravado: $ 11.104.645,01\n"
+            "IVA 21%: $ 2.331.975,45\n"
+            "Total: $ 13.436.620,46\n"
+        ),
+        source_type="email",
+        original_filename="das-dach.pdf",
+        mime_type="application/pdf",
+        sha256="ff001122" + "7" * 56,
+        ocr_engine="pdf_text_plus_ocr",
+    )
+
+    assert invoice["estado"] == "REVIEW_REQUIRED"
+    assert invoice["comprobante"]["punto_venta"] == ""
+    assert invoice["comprobante"]["numero"] == "00007777"
+
+
 def test_extract_afip_comprobante_code_finds_near_header_code() -> None:
     assert _extract_afip_comprobante_code("FACTURA A\nCod. 001\nNro 0006-00005780") == "001"
 
