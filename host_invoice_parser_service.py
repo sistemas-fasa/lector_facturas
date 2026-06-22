@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from invoice_ai_extractor.service import extract_invoice_ai_first
 from invoice_parser_helpers import atomic_write_files, build_invoice_json, sha256_bytes, write_invoice_staging, build_diagnostico, write_debug_text_files, classify_document_type, NON_INVOICE_TYPES
 
 
@@ -1012,37 +1013,64 @@ def process_invoice_upload(
         if existing:
             print(f"hash duplicado: sha256={sha} factura_id={(existing.get('staging') or {}).get('factura_id')}", flush=True)
             return dict(existing, duplicate=True)
-    qr_afip = extract_afip_qr(data, ext)
-    print(f"QR {'detectado' if qr_afip else 'no detectado'}", flush=True)
-    text_sources = extract_text_sources(data, ext)
-    ocr_text = text_sources["combined_text"]
-    ocr_engine = text_sources["engine"]
-    print(
-        f"textos extraidos: pdf_text_chars={len(text_sources['pdf_text'])} ocr_text_chars={len(text_sources['ocr_text'])} fuente={ocr_engine}",
-        flush=True,
-    )
-    invoice = build_invoice_json(
-        ocr_text=ocr_text,
-        pdf_text=text_sources["pdf_text"],
-        source_type=source_type,
-        original_filename=original_filename,
-        mime_type=mime_type,
-        sha256=sha,
-        phash="",
-        ocr_confidence=None if ocr_engine in {"pdftotext", "pdf_ocr", "image_ocr"} else 0,
-        ocr_engine=ocr_engine,
-        qr_afip=qr_afip,
-        source_metadata=source_metadata,
-    )
+    legacy_context: dict[str, object] = {}
 
-    clasificacion = classify_document_type(
-        combined_text=ocr_text,
-        pdf_text=text_sources["pdf_text"],
-        ocr_text=text_sources["ocr_text"],
-        qr_afip=qr_afip,
+    def _legacy_extractor(ai_trace: dict[str, object]) -> dict[str, object]:
+        qr_afip = extract_afip_qr(data, ext)
+        print(f"QR {'detectado' if qr_afip else 'no detectado'}", flush=True)
+        text_sources = extract_text_sources(data, ext)
+        ocr_text = text_sources["combined_text"]
+        ocr_engine = text_sources["engine"]
+        print(
+            f"textos extraidos: pdf_text_chars={len(text_sources['pdf_text'])} ocr_text_chars={len(text_sources['ocr_text'])} fuente={ocr_engine}",
+            flush=True,
+        )
+        legacy_invoice = build_invoice_json(
+            ocr_text=ocr_text,
+            pdf_text=text_sources["pdf_text"],
+            source_type=source_type,
+            original_filename=original_filename,
+            mime_type=mime_type,
+            sha256=sha,
+            phash="",
+            ocr_confidence=None if ocr_engine in {"pdftotext", "pdf_ocr", "image_ocr"} else 0,
+            ocr_engine=ocr_engine,
+            qr_afip=qr_afip,
+            source_metadata=source_metadata,
+        )
+        legacy_context.update({"qr_afip": qr_afip, "text_sources": text_sources, "ocr_text": ocr_text})
+        return legacy_invoice
+
+    ai_first = extract_invoice_ai_first(
+        document_bytes=data,
         filename=original_filename,
         mime_type=mime_type,
+        sha256=sha,
+        legacy_extractor=_legacy_extractor,
     )
+    invoice = ai_first.invoice
+    text_sources = legacy_context.get("text_sources") or {"pdf_text": "", "ocr_text": "", "combined_text": "", "engine": "openrouter_ai"}
+    ocr_text = str(legacy_context.get("ocr_text") or "")
+    qr_afip = legacy_context.get("qr_afip") or {}
+
+    if ai_first.trace.get("fallback_usado"):
+        clasificacion = classify_document_type(
+            combined_text=ocr_text,
+            pdf_text=text_sources["pdf_text"],
+            ocr_text=text_sources["ocr_text"],
+            qr_afip=qr_afip,
+            filename=original_filename,
+            mime_type=mime_type,
+        )
+    else:
+        clasificacion = {
+            "tipo_documento": "FACTURA",
+            "confianza": int((ai_first.trace.get("ai") or {}).get("confidence", 0) * 100),
+            "fuente": "openrouter_ai",
+            "metodo": "ai_validated",
+            "evidencia": "Extraccion AI validada localmente",
+            "requiere_revision": False,
+        }
     invoice.setdefault("diagnostico", {})["clasificacion_documento"] = clasificacion
     invoice.setdefault("origen", {})["clasificacion_documento"] = clasificacion
 

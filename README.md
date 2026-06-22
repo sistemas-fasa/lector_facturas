@@ -1,13 +1,17 @@
 # Lector de Facturas
 
-Parser local de facturas para n8n, MySQL staging y consumo desde Visual FoxPro.
+Parser de facturas para n8n, MySQL staging y consumo desde Visual FoxPro.
 
-El flujo evita IA generativa: usa lectura de texto PDF, OCR local con Tesseract,
-QR AFIP, reglas Python y persistencia MySQL.
+El flujo principal nuevo es **AI-first via OpenRouter**: el sidecar intenta
+extraer la factura desde el archivo original con IA multimodal, valida la
+respuesta localmente con reglas duras y solo despues cae al pipeline legacy
+de PDF text / QR / OCR / PyOCR / regex.
 
 ## Componentes principales
 
 - `host_invoice_parser_service.py`: sidecar HTTP para recibir archivos desde n8n.
+- `invoice_ai_extractor/`: extraccion AI-first via OpenRouter, validacion local
+  y orquestacion de fallback legacy.
 - `invoice_parser_helpers.py`: armado de JSON legacy, JSON enriquecido, XML y staging.
 - `factura_ocr/`: reglas locales de extracción sobre texto PDF/OCR.
 - `facturas_ocr_staging.sql`: tablas y vistas MySQL para FoxPro.
@@ -20,14 +24,99 @@ python -m pytest -q
 python -m compileall invoice_parser_helpers.py host_invoice_parser_service.py invoice_parser_runtime.py factura_ocr
 ```
 
-## Arquitectura híbrida
+## Arquitectura AI-first
 
 Ver `docs/architecture.md` para el detalle de la arquitectura:
 
-- **Pipeline determinístico** (siempre activo): QR AFIP → PDF text → OCR Tesseract
-  → reglas locales → validación cruzada → staging MySQL.
-- **Fallback IA** (desactivado por defecto): opcional, solo para casos
-  `REVIEW_REQUIRED`, nunca reemplaza datos del QR AFIP.
+- **Pipeline principal**: archivo original → OpenRouter AI extractor →
+  validacion local dura → staging MySQL.
+- **Fallback legacy**: QR AFIP → PDF text → OCR Tesseract → reglas locales →
+  validacion cruzada, usado solo si IA esta deshabilitada, falla, devuelve JSON
+  invalido o no supera validaciones.
+
+## Configuracion IA
+
+Modelo recomendado para validar facturas reales:
+
+```env
+INVOICE_AI_ENABLED=true
+INVOICE_AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=google/gemini-2.5-flash
+OPENROUTER_FALLBACK_MODEL=
+INVOICE_AI_ALLOW_FREE_MODELS=false
+INVOICE_AI_TIMEOUT_SECONDS=60
+INVOICE_AI_MAX_RETRIES=1
+INVOICE_AI_DEBUG=true
+INVOICE_AI_STORE_RAW_RESPONSE=true
+INVOICE_AI_LOG_RAW_RESPONSE=false
+INVOICE_AI_MIN_CONFIDENCE=0.70
+INVOICE_AI_REQUIRE_CRITICAL_FIELDS=true
+INVOICE_AI_TOTAL_TOLERANCE=2.00
+INVOICE_AI_FALLBACK_LEGACY=true
+```
+
+`google/gemini-2.5-flash-lite` queda como opcion economica para pruebas
+controladas. `openrouter/free` solo debe usarse para probar conectividad, API
+key y consumo contra OpenRouter. No se recomienda para facturas reales porque el
+router puede elegir modelos que omiten campos fiscales criticos como
+`punto_venta`, `codigo_afip`, letra o confianza.
+
+Produccion debe usar modelos sin `:free` salvo decision explicita:
+
+```env
+INVOICE_AI_ENABLED=true
+INVOICE_AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=google/gemini-2.5-flash
+OPENROUTER_FALLBACK_MODEL=google/gemini-2.5-flash-lite
+INVOICE_AI_ALLOW_FREE_MODELS=false
+INVOICE_AI_TIMEOUT_SECONDS=45
+INVOICE_AI_MAX_RETRIES=2
+INVOICE_AI_DEBUG=false
+INVOICE_AI_STORE_RAW_RESPONSE=true
+INVOICE_AI_LOG_RAW_RESPONSE=false
+INVOICE_AI_MIN_CONFIDENCE=0.75
+INVOICE_AI_REQUIRE_CRITICAL_FIELDS=true
+INVOICE_AI_TOTAL_TOLERANCE=2.00
+INVOICE_AI_FALLBACK_LEGACY=true
+```
+
+Si `OPENROUTER_MODEL` es `openrouter/free` o contiene `:free` y
+`INVOICE_AI_ALLOW_FREE_MODELS` no es `true`, la IA no se usa y el sistema cae
+al fallback legacy con error controlado en trazabilidad.
+
+Criterio de cierre del PR IA-first: el test live debe confirmar que Gemini
+Flash levanta `punto_venta`, `codigo_afip`, numero, fecha, CUIT y total en una
+factura real. Si no cumple esos campos, el siguiente paso es renderizar el PDF
+como imagen antes de seguir ajustando prompts.
+
+### Validacion live con OpenRouter pago
+
+El test live usa la factura local
+`muestras_privadas/02.05.2026 - tte hd FACTURA N°23796.pdf` y valida campos
+criticos reales. Requiere `OPENROUTER_API_KEY` configurada en `.env` o en el
+entorno y creditos disponibles en OpenRouter.
+
+PowerShell:
+
+```powershell
+$env:RUN_OPENROUTER_LIVE_TESTS='1'
+$env:OPENROUTER_MODEL='google/gemini-2.5-flash'
+$env:OPENROUTER_FALLBACK_MODEL=''
+$env:INVOICE_AI_ALLOW_FREE_MODELS='false'
+python -m pytest test_openrouter_live_invoice.py -q
+```
+
+Para probar la opcion economica, cambiar solo:
+
+```powershell
+$env:OPENROUTER_MODEL='google/gemini-2.5-flash-lite'
+```
+
+El PR no debe salir de draft hasta que el test live pase con un modelo pago
+fijo. Si falla por campos fiscales faltantes, el siguiente paso es renderizar el
+PDF como imagen antes de seguir tocando prompts.
 
 ## Ingesta de correo con n8n
 

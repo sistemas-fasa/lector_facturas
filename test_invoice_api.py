@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import pytest
 
 from host_invoice_parser_service import (
+    process_invoice_upload,
     _invoice_list_item,
     _scan_invoice_files,
     _compute_invoices_summary,
@@ -1064,3 +1065,68 @@ class TestAdminHTMLFileLinks:
         html_content, status = handler.send_html_called
         assert status == 200
         assert "No disponible" in html_content
+
+
+def test_process_invoice_upload_ai_success_does_not_call_legacy_extractors(monkeypatch, tmp_path: Path):
+    import host_invoice_parser_service as service
+
+    invoice = {
+        "version": "2.0-ai",
+        "estado": "OK",
+        "origen": {
+            "tipo": "ai_openrouter",
+            "archivo_original": "factura.pdf",
+            "mime_type": "application/pdf",
+            "sha256": "abc",
+        },
+        "comprobante": {
+            "tipo": "FACTURA",
+            "codigo": "001",
+            "letra": "A",
+            "punto_venta": "0007",
+            "numero": "00007777",
+            "fecha_emision": "2026-06-19",
+            "moneda": "ARS",
+            "cae": "86250381245054",
+        },
+        "emisor": {"razon_social": "DAS DACH S.A.", "cuit": "33711969859"},
+        "receptor": {"razon_social": "", "cuit": "", "iva_condicion": ""},
+        "importes": {"neto_gravado": 100.0, "iva_21": 21.0, "total": 121.0},
+        "items": [],
+        "percepciones_iibb_detalle": [],
+        "ocr": {"texto": "", "confianza": None, "motor": "openrouter_ai"},
+        "qr_afip": {},
+        "validaciones": {"requiere_revision": False, "observaciones": []},
+        "diagnostico": {},
+        "extraccion_enriquecida": {
+            "ai": {"enabled": True, "confidence": 0.9, "validaciones": {"ok": True, "fallas": []}},
+            "fallback_usado": False,
+            "fallback_tipo": None,
+            "validaciones": {"ok": True, "fallas": []},
+        },
+    }
+
+    class Result:
+        def __init__(self):
+            self.invoice = invoice
+            self.trace = invoice["extraccion_enriquecida"]
+
+    monkeypatch.setattr(service, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(service, "GENERATE_XML", False)
+    monkeypatch.setattr(service, "find_existing_invoice_result", lambda sha: None)
+    monkeypatch.setattr(service, "extract_invoice_ai_first", lambda **kwargs: Result())
+    monkeypatch.setattr(service, "extract_afip_qr", lambda *args, **kwargs: pytest.fail("QR legacy should not run before AI"))
+    monkeypatch.setattr(service, "extract_text_sources", lambda *args, **kwargs: pytest.fail("OCR legacy should not run before AI"))
+    monkeypatch.setattr(service, "write_invoice_staging", lambda invoice, written: {"enabled": True, "ok": True, "factura_id": 1})
+
+    result = process_invoice_upload(
+        data=b"%PDF",
+        source_type="email",
+        original_filename="factura.pdf",
+        mime_type="application/pdf",
+        source_metadata={},
+        force=True,
+    )
+
+    assert result["status"] == "OK"
+    assert result["requires_review"] is False
